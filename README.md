@@ -10,13 +10,13 @@ and a self‑contained AppImage.</p>
 
 <p align="center">
   <a href="#install">Install</a> ·
-  <a href="#youtube-music-account">YouTube account</a> ·
+  <a href="#youtube-music-account">Add YouTube account</a> ·
   <a href="#build-the-appimage">Build the AppImage</a> ·
   <a href="#license">License</a>
 </p>
 
 > **This is a fork.** Spun is created by
-> [**yappologistic**](https://github.com/yappologistic/Spun). This fork adds a fuller YouTube&nbsp;Music integration and an AppImage
+> [**yappologistic**](https://github.com/yappologistic/Spun). This fork adds a better YouTube&nbsp;Music integration and an AppImage
 > build. All credit for the original app goes to the upstream author; see
 > [License](#license).
 
