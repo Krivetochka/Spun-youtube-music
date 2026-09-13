@@ -46,6 +46,8 @@
 #include <QFontDatabase>
 #include <QFontInfo>
 #include <QFont>
+#include <QSslCertificate>
+#include <QSslConfiguration>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QSignalMapper>
@@ -490,7 +492,7 @@ static int exercise(Player &player, Theme &theme, Lyrics &lyrics, QQuickWindow *
         QSemaphore started, release;
         auto blockedWorker = QtConcurrent::run([&] { started.release(); release.acquire(); });
         started.acquire();
-        player.addUrls({QUrl::fromLocalFile(QStringLiteral(SPUN_SOURCE_DIR "/assets/First-Light.flac"))}, false);
+        player.addUrls({QUrl::fromLocalFile(qEnvironmentVariable("SPUN_DEMO_FILE", QStringLiteral(SPUN_DEMO_FILE)))}, false);
         QTest::qWait(150);
         auto *notice = findItem(window->contentItem(), "actionNotice");
         auto *cancel = findItem(window->contentItem(), "cancelImportButton");
@@ -563,7 +565,7 @@ static int exercise(Player &player, Theme &theme, Lyrics &lyrics, QQuickWindow *
         QList<QUrl> browsingTracks;
         for(int i=0;i<12;++i) {
             const auto path=temp+QString("/queue-browse-%1.flac").arg(i);
-            QFile::copy(QStringLiteral(SPUN_SOURCE_DIR "/assets/First-Light.flac"),path);browsingTracks.append(QUrl::fromLocalFile(path));
+            QFile::copy(qEnvironmentVariable("SPUN_DEMO_FILE", QStringLiteral(SPUN_DEMO_FILE)),path);browsingTracks.append(QUrl::fromLocalFile(path));
         }
         player.addUrls(browsingTracks,false);waitFor([&]{return !player.busy()&&player.count()==12;});
         player.select(0,false);player.pause();window->setProperty("queueOpen",true);QTest::qWait(200);
@@ -869,7 +871,7 @@ static int exercise(Player &player, Theme &theme, Lyrics &lyrics, QQuickWindow *
     testKeyClick(window,Qt::Key_F1);QTest::qWait(250);
     check(shortcuts->property("opened").toBool(),"shortcuts can reopen after dismissal");
     testKeyClick(window,Qt::Key_Escape);QTest::qWait(200);
-    const auto demo = QStringLiteral(SPUN_SOURCE_DIR "/assets/First-Light.flac");
+    const auto demo = qEnvironmentVariable("SPUN_DEMO_FILE", QStringLiteral(SPUN_DEMO_FILE));
     const auto other = temp + "/Second-Light.flac";
     QFile::copy(demo, other);
     { TagLib::FileRef tagged(other.toUtf8().constData()); tagged.tag()->setTitle("Second Light"); tagged.tag()->setYear(2026); tagged.tag()->setTrack(2); tagged.save(); }
@@ -1585,6 +1587,23 @@ int main(int argc, char **argv) {
     if (!qEnvironmentVariableIsSet("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES"))
         qputenv("QT_FFMPEG_ENCODING_HW_DEVICE_TYPES", ",");
     QGuiApplication app(argc, argv);
+    // Qt loads TLS trust roots from its own list of system paths, which do not
+    // exist on every distribution (e.g. Fedora), so HTTPS album artwork fails to
+    // verify with "issuer certificate ... could not be found". When a CA bundle
+    // is provided via SSL_CERT_FILE (the AppImage ships one), merge it into the
+    // default TLS configuration so verification works on any distribution.
+    {
+        const auto caFile = qEnvironmentVariable("SSL_CERT_FILE");
+        QFile caData(caFile);
+        if (!caFile.isEmpty() && caData.open(QIODevice::ReadOnly)) {
+            const auto certs = QSslCertificate::fromData(caData.readAll(), QSsl::Pem);
+            if (!certs.isEmpty()) {
+                auto tls = QSslConfiguration::defaultConfiguration();
+                tls.setCaCertificates(tls.caCertificates() + certs);
+                QSslConfiguration::setDefaultConfiguration(tls);
+            }
+        }
+    }
     // Some Wayland/OpenGL integrations default to Qt's basic 16 ms animation
     // driver. Use the vsync-driven loop for the native hardware renderer.
     // Keep software rendering and explicit compatibility overrides intact.

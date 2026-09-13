@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Spun
+GenericName=Music Player
+Comment=A retro-inspired music player with local playback and YouTube Music
+Exec=spun
+Icon=spun
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+StartupWMClass=spun

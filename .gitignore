@@ -33,6 +33,7 @@
 !/assets/screenshots/
 /assets/screenshots/*
 !/assets/screenshots/spun-vinyl.png
+!/assets/screenshots/youtube-headers.png
 !/assets/icons/
 /assets/icons/*
 !/assets/icons/*.svg
@@ -51,6 +52,14 @@
 __pycache__/
 cider-connection.json
 listening.json
+
+!/packaging/
+/packaging/*
+!/packaging/appimage/
+/packaging/appimage/*
+!/packaging/appimage/*.sh
+!/packaging/appimage/*.desktop
+!/packaging/appimage/*.md
 
 !/helper/
 /helper/*

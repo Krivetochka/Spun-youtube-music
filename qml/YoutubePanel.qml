@@ -13,8 +13,8 @@ Rectangle {
     property string renameId: ""
     property string searchFilter: "songs"
     property int revision: 0
-    readonly property bool actionsOpen: actions.visible || pageActions.visible || nameDialog.visible || playlistPicker.visible || deleteDialog.visible || historyDialog.visible
-    function closeActions(){actions.close();pageActions.close();nameDialog.close();playlistPicker.close();deleteDialog.close();historyDialog.close()}
+    readonly property bool actionsOpen: actions.visible || pageActions.visible || nameDialog.visible || playlistPicker.visible || deleteDialog.visible || historyDialog.visible || authDialog.visible || signOutDialog.visible
+    function closeActions(){actions.close();pageActions.close();nameDialog.close();playlistPicker.close();deleteDialog.close();historyDialog.close();authDialog.close();signOutDialog.close()}
     function settle() { entrance.stop(); opacity = 1; entranceOffset.x = 0 }
     onVisibleChanged: {
         if (!visible) closeActions()
@@ -28,15 +28,15 @@ Rectangle {
         NumberAnimation { target: panel; property: "opacity"; from: 0; to: 1; duration: SpunStyle.feedback; easing.type: Easing.BezierSpline; easing.bezierCurve: SpunStyle.effectsCurve }
         NumberAnimation { target: entranceOffset; property: "x"; from: 12; to: 0; duration: SpunStyle.enter; easing.type: Easing.BezierSpline; easing.bezierCurve: SpunStyle.enterCurve }
     }
-    readonly property string selectedPage: playlistPage ? "playlists" : ["favorites", "playlists", "history"].includes(youtube.page) ? youtube.page : "search"
+    readonly property string selectedPage: playlistPage ? "playlists" : ["favorites", "playlists", "history", "account"].includes(youtube.page) ? youtube.page : "search"
     Connections { target: youtube; function onChanged(){ panel.revision++; list.currentIndex=-1 } }
     function menuFor(row,index) { selected=row; selectedIndex=index; actions.open() }
     function focusSearch() { search.forceActiveFocus(); search.selectAll() }
     function playAll() { youtube.playItems(youtube.items) }
 
     Rectangle {
-        SpunSpring { id: tabMotion; targetValue: 12 + ["search", "favorites", "playlists", "history"].indexOf(panel.selectedPage) * ((panel.width - 24) / 4) }
-        x: tabMotion.value; y: 12; width: (panel.width - 24) / 4; height: 36
+        SpunSpring { id: tabMotion; targetValue: 12 + ["search", "favorites", "playlists", "history", "account"].indexOf(panel.selectedPage) * ((panel.width - 24) / 5) }
+        x: tabMotion.value; y: 12; width: (panel.width - 24) / 5; height: 36
         radius: 18 * theme.radius; color: SpunStyle.selected
     }
     Row {
@@ -47,12 +47,12 @@ Rectangle {
         function focusTab(index) { tabItems.itemAt(Math.max(0, Math.min(tabItems.count - 1, index))).forceActiveFocus(Qt.TabFocusReason) }
         Repeater {
             id: tabItems
-            model: [{name:"Search",page:"search"},{name:"Favorites",page:"favorites"},{name:"Playlists",page:"playlists"},{name:"History",page:"history"}]
+            model: [{name:"Search",page:"search"},{name:"Favorites",page:"favorites"},{name:"Playlists",page:"playlists"},{name:"History",page:"history"},{name:"Account",page:"account"}]
             SpunChoiceButton {
                 required property var modelData
                 required property int index
                 objectName: "youtubeTab_" + modelData.page
-                width: (panel.width - 24) / 4; text: modelData.name; pill: false
+                width: (panel.width - 24) / 5; text: modelData.name; pill: false
                 ink: panel.app.ink; mutedInk: panel.app.mutedInk; accent: panel.app.accent
                 selected: panel.selectedPage === modelData.page
                 Accessible.role: Accessible.PageTab
@@ -102,8 +102,8 @@ Rectangle {
         clip: true; spacing: 2; model: youtube.items; visible: !youtube.busy && !youtube.error.length
         boundsBehavior: Flickable.StopAtBounds
         ScrollBar.vertical: ScrollBar {}
-        Keys.onReturnPressed: {if(currentIndex>=0)youtube.open(youtube.items[currentIndex])}
-        Keys.onEnterPressed: {if(currentIndex>=0)youtube.open(youtube.items[currentIndex])}
+        Keys.onReturnPressed: {if(currentIndex>=0)youtube.openAt(youtube.items[currentIndex],currentIndex)}
+        Keys.onEnterPressed: {if(currentIndex>=0)youtube.openAt(youtube.items[currentIndex],currentIndex)}
         delegate: ItemDelegate {
             id: row
             required property var modelData
@@ -118,7 +118,7 @@ Rectangle {
                 radius: SpunStyle.rowRadius; color: row.highlighted ? panel.app.inset : "transparent"
                 SpunStateLayer {anchors.fill:parent;radius:12;color:panel.app.ink;pressed:row.down;hovered:row.hovered;focused:row.visualFocus}
             }
-            onClicked: {list.currentIndex=index;youtube.open(modelData)}
+            onClicked: {list.currentIndex=index;youtube.openAt(modelData,index)}
             Image {
                 x: 8; y: 12; width: 44; height: 44
                 source: row.modelData.art || ""; asynchronous: true; sourceSize: Qt.size(88,88); fillMode: Image.PreserveAspectCrop
@@ -131,10 +131,20 @@ Rectangle {
     }
     Column {
         x: 24; y: 230; width: parent.width-48; spacing: 16
-        visible: !youtube.busy && (youtube.error.length>0 || youtube.items.length===0)
+        visible: !youtube.busy && youtube.page!=="account" && (youtube.error.length>0 || youtube.items.length===0)
         SpunText {width:parent.width;text:youtube.error || (youtube.page==="search"?"Find a song, album, artist or playlist. No account needed.":"Nothing here yet.");wrapMode:Text.WordWrap;color:youtube.error.length?theme.colors.error:panel.app.mutedInk;font.pixelSize:SpunStyle.body}
         SpunButton {objectName:"youtubeRetry";text:"Retry";visible:youtube.error.length>0;onClicked:{if(!youtube.ready)youtube.check();else if(search.text.trim().length)youtube.search(search.text,panel.searchFilter);else youtube.show("home")}}
         SpunButton {objectName:"youtubeDiscover";text:"Discover music";visible:!youtube.error.length && youtube.page==="search";onClicked:youtube.show("home")}
+    }
+    // Account tab: sign-in prompt and OAuth device-flow progress. When signed
+    // in the results list above shows the library sections instead.
+    Column {
+        objectName: "youtubeAccount"
+        x: 24; y: 230; width: parent.width-48; spacing: 16
+        visible: !youtube.busy && youtube.page==="account" && !youtube.signedIn
+        SpunText {width:parent.width;text:youtube.authError;visible:youtube.authError.length>0;wrapMode:Text.WordWrap;color:theme.colors.error;font.pixelSize:SpunStyle.body}
+        SpunText {width:parent.width;text:"Sign in to browse your own YouTube Music library, liked songs and playlists, and to like songs back to YouTube. Spun stores the session only on this device.";wrapMode:Text.WordWrap;color:panel.app.mutedInk;font.pixelSize:SpunStyle.body}
+        SpunButton {objectName:"youtubeSignIn";text:"Sign in to YouTube Music…";onClicked:authDialog.open()}
     }
 
     component Action: MenuItem {
@@ -153,6 +163,7 @@ Rectangle {
         Action {text:"Play";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:youtube.playItem(panel.selected)}
         Action {text:"Add to queue";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:youtube.enqueue(panel.selected)}
         Action {text:{panel.revision;return youtube.favorite(panel.selected.id||"")?"Remove from favorites":"Save to favorites"} visible:panel.selected.kind!=="local-playlist";height:visible?implicitHeight:0;onTriggered:youtube.toggleFavorite(panel.selected)}
+        Action {text:"Like on YouTube Music";visible:youtube.signedIn && (panel.selected.kind==="song"||panel.selected.kind==="video");height:visible?implicitHeight:0;onTriggered:youtube.likeOnYoutube(panel.selected,true)}
         Action {text:"Add to playlist…";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:playlistPicker.open()}
         Action {text:"Song radio";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:youtube.radio(panel.selected)}
         Action {text:"Open album";enabled:!!panel.selected.albumId;onTriggered:youtube.open({id:panel.selected.albumId,kind:"album",title:panel.selected.album})}
@@ -167,10 +178,13 @@ Rectangle {
         id: pageActions; width: 240; x:panel.width-width-8;y:196
         background:Rectangle {color:SpunStyle.popup;radius:SpunStyle.popupRadius}
         Action {text:"Play all";enabled:youtube.items.some(row=>row.kind==="song"||row.kind==="video");onTriggered:panel.playAll()}
+        Action {objectName:"youtubeShuffle";text:"Shuffle";enabled:youtube.items.some(row=>row.kind==="song"||row.kind==="video");onTriggered:youtube.shufflePlay()}
         Action {objectName:"youtubeNewPlaylist";text:"New playlist…";onTriggered:{panel.renameId="";nameField.text="";nameDialog.open()}}
         Action {text:"Rename playlist…";visible:panel.playlistPage;height:visible?implicitHeight:0;onTriggered:{panel.renameId=youtube.page.slice(9);nameField.text=youtube.heading;nameDialog.open()}}
         Action {text:"Delete playlist…";visible:panel.playlistPage;height:visible?implicitHeight:0;onTriggered:deleteDialog.open()}
         Action {text:"Clear history…";visible:youtube.page==="history";height:visible?implicitHeight:0;onTriggered:historyDialog.open()}
+        Action {objectName:"youtubeSignInAction";text:"Sign in to YouTube Music…";visible:!youtube.signedIn;height:visible?implicitHeight:0;onTriggered:authDialog.open()}
+        Action {objectName:"youtubeSignOutAction";text:"Sign out of YouTube Music…";visible:youtube.signedIn;height:visible?implicitHeight:0;onTriggered:signOutDialog.open()}
     }
     component LibraryDialog: Dialog {
         id: libraryDialog
@@ -223,4 +237,31 @@ Rectangle {
     }
     LibraryDialog {id:deleteDialog; acceptText:"Delete"; palette.window:panel.app.surface;palette.windowText:panel.app.ink;palette.buttonText:panel.app.accent;title:"Delete this playlist?";modal:true;focus:true;width:Math.min(320,panel.width-32);x:(panel.width-width)/2;y:Math.max(16,Math.min(180,panel.height-height-16));standardButtons:Dialog.Ok|Dialog.Cancel;onAccepted:youtube.deletePlaylist(youtube.page.slice(9));contentItem:SpunText {text:"This removes the saved list from this device.";wrapMode:Text.WordWrap;color:panel.app.ink}}
     LibraryDialog {id:historyDialog; acceptText:"Clear"; palette.window:panel.app.surface;palette.windowText:panel.app.ink;palette.buttonText:panel.app.accent;title:"Clear listening history?";modal:true;focus:true;width:Math.min(320,panel.width-32);x:(panel.width-width)/2;y:Math.max(16,Math.min(180,panel.height-height-16));standardButtons:Dialog.Ok|Dialog.Cancel;onAccepted:youtube.clearHistory();contentItem:SpunText {text:"This clears YouTube listening history stored on this device.";wrapMode:Text.WordWrap;color:panel.app.ink}}
+    LibraryDialog {
+        id:authDialog; objectName:"youtubeAuthDialog"; acceptText:"Sign in"; palette.window:panel.app.surface;palette.windowText:panel.app.ink;palette.text:panel.app.ink;palette.base:panel.app.inset;palette.buttonText:panel.app.accent;title:"Sign in to YouTube Music";modal:true;focus:true;width:Math.min(420,panel.width-32);x:(panel.width-width)/2;y:Math.max(16,Math.min(80,panel.height-height-16))
+        standardButtons:Dialog.Ok|Dialog.Cancel
+        onOpened:{headerField.text="";headerField.forceActiveFocus();standardButton(Dialog.Ok).enabled=false}
+        onAccepted:{youtube.signIn(headerField.text);headerField.text=""}
+        contentItem: Column {
+            spacing: SpunStyle.gap
+            SpunText {width:parent.width;text:"In a signed-in music.youtube.com tab: DevTools → Network, filter “youtubei”, click a browse request (200), then copy it. Firefox: “Copy Request Headers”. Chrome: “Copy → Copy as cURL”. Paste below — stored only on this device.";wrapMode:Text.WordWrap;color:panel.app.mutedInk;font.pixelSize:SpunStyle.caption}
+            Rectangle {
+                width:parent.width; height:Math.max(120,panel.height-320); radius:SpunStyle.rowRadius; color:panel.app.inset
+                Flickable {
+                    anchors.fill:parent; anchors.margins:8; clip:true
+                    contentWidth:width; contentHeight:headerField.contentHeight
+                    ScrollBar.vertical: ScrollBar {}
+                    TextArea.flickable: TextArea {
+                        id:headerField; objectName:"youtubeAuthHeaders"
+                        wrapMode:TextEdit.Wrap; selectByMouse:true; background:null
+                        color:panel.app.ink; placeholderTextColor:panel.app.mutedInk
+                        font.family:SpunStyle.family; font.pixelSize:SpunStyle.caption
+                        placeholderText:"Paste request headers here"
+                        onTextChanged:if(authDialog.visible)authDialog.standardButton(Dialog.Ok).enabled=text.trim().length>0
+                    }
+                }
+            }
+        }
+    }
+    LibraryDialog {id:signOutDialog; objectName:"youtubeSignOutDialog"; acceptText:"Sign out"; palette.window:panel.app.surface;palette.windowText:panel.app.ink;palette.buttonText:panel.app.accent;title:"Sign out of YouTube Music?";modal:true;focus:true;width:Math.min(320,panel.width-32);x:(panel.width-width)/2;y:Math.max(16,Math.min(180,panel.height-height-16));standardButtons:Dialog.Ok|Dialog.Cancel;onAccepted:youtube.signOut();contentItem:SpunText {text:"This removes the stored account and tokens from this device. Your local favorites, playlists and history are kept.";wrapMode:Text.WordWrap;color:panel.app.ink}}
 }

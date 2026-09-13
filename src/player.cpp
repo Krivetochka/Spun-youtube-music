@@ -465,7 +465,7 @@ void Player::setCover(const QUrl &url) {
     m_tracks[m_index].cover = url.toLocalFile();
     loadArt(); emit queueChanged(); save();
 }
-void Player::demo() { addUrls({QUrl::fromLocalFile(QStringLiteral(SPUN_DEMO_FILE))}); }
+void Player::demo() { addUrls({QUrl::fromLocalFile(qEnvironmentVariable("SPUN_DEMO_FILE", QStringLiteral(SPUN_DEMO_FILE)))}); }
 void Player::setVolume(double value) {
     value = qBound(0., value, 1.);
     if (m_volume == value) return;
@@ -655,7 +655,10 @@ void Player::retryExternal() {
     play();
 }
 void Player::resolveExternal(const QString &key, const QUrl &source) {
-    if (!m_external || key != trackKey() || !source.isLocalFile() || !QFileInfo::exists(source.toLocalFile())) return;
+    // Accept a downloaded local file or a direct https stream URL (YouTube).
+    const bool localOk = source.isLocalFile() && QFileInfo::exists(source.toLocalFile());
+    const bool remoteOk = source.scheme() == "https" && !source.host().isEmpty();
+    if (!m_external || key != trackKey() || !(localOk || remoteOk)) return;
     const bool autoplay = std::exchange(m_externalWantPlay, false);
     const auto pendingPosition = m_restorePosition;
     m_externalSource = source;

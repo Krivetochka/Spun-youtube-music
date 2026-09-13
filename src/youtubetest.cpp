@@ -384,6 +384,49 @@ int exerciseYoutube(Player &local, Youtube &yt, QQuickWindow *window,
         "corrupt library is not overwritten");
   check(Youtube::cleanItem({{"id", "../bad"}, {"kind", "song"}}).isEmpty(),
         "invalid provider identity rejected");
+  // Opening a song inside a list queues the whole list from it, and shuffle
+  // mixes the list instead of looping one track.
+  yt.search("fixture");
+  check(until([&] { return !yt.busy() && yt.items().size() == 2; }),
+        "list ready for queueing");
+  yt.openAt(yt.items()[1].toMap(), 1);
+  check(until([&] { return p->count() == 2; }) && p->currentIndex() == 1,
+        "opening a list song queues the whole list from it");
+  yt.shufflePlay();
+  check(until([&] { return p->count() == 2; }) && p->shuffle(),
+        "shuffle plays the whole list");
+  p->setShuffle(false);
+  p->pause();
+  p->clear();
+  // Account sign-in (browser headers) over the fixture.
+  check(!yt.signedIn(), "starts signed out");
+  yt.show("account");
+  check(yt.items().isEmpty(), "signed-out account tab has no sections");
+  yt.signIn("cookie: SID=fixture\nx-goog-authuser: 0");
+  check(until([&] { return yt.signedIn(); }, 8000), "browser sign-in completes");
+  check(yt.account() == "Fixture User", "signed-in account name is shown");
+  check(QFileInfo::exists(QFileInfo(temp + "/player.ini").absolutePath() +
+                          "/youtube/account.json"),
+        "account file stored locally");
+  yt.show("account");
+  check(yt.items().size() == 5, "account tab lists library sections");
+  yt.syncLibrary("liked");
+  check(until([&] { return !yt.busy() && yt.items().size() == 2; }),
+        "liked songs load from the account");
+  yt.syncLibrary("playlists");
+  check(until([&] {
+          return !yt.busy() && yt.items().size() == 1 &&
+                 yt.items().first().toMap().value("kind") == "playlist";
+        }),
+        "library playlists load from the account");
+  yt.likeOnYoutube(first, true);
+  yt.signOut();
+  check(!yt.signedIn() && yt.account().isEmpty(), "sign-out clears the account");
+  check(!QFileInfo::exists(QFileInfo(temp + "/player.ini").absolutePath() +
+                           "/youtube/account.json"),
+        "sign-out removes the local account file");
+  check(yt.favorite(first["id"].toString()),
+        "local favorites survive sign-out");
   std::cout << "YouTube checks " << checks << ", failures " << failures
             << std::endl;
   return failures ? 1 : 0;

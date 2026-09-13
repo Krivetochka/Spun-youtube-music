@@ -1,6 +1,7 @@
 #include "youtube.h"
 #include <QBuffer>
 #include <QClipboard>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -10,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
@@ -23,6 +25,18 @@ static QString keyFor(const QString &id) {
 static bool videoId(const QString &id) {
   static const QRegularExpression pattern("^[A-Za-z0-9_-]{11}$");
   return pattern.match(id).hasMatch();
+}
+// Direct audio stream URLs come from Google's video CDN and expire after a few
+// hours; treat a cached URL as fresh for well under that window.
+static constexpr qint64 kStreamTtlSeconds = 60 * 60;
+static bool streamUrl(const QUrl &url) {
+  return url.scheme() == "https" && url.host().endsWith(".googlevideo.com");
+}
+// A resolved source is a direct Google stream URL, or a local file (used by the
+// offline test fixture) that actually exists.
+static bool playableSource(const QUrl &url) {
+  return streamUrl(url) ||
+         (url.isLocalFile() && QFileInfo::exists(url.toLocalFile()));
 }
 static bool artUrl(const QUrl &url) {
   const auto host = url.host().toLower();
@@ -63,8 +77,10 @@ QVariantMap Youtube::cleanItem(const QVariantMap &row) {
 }
 Youtube::Youtube(const QString &directory, QObject *parent)
     : QObject(parent), m_player(directory + "/transport.ini", nullptr, true),
-      m_directory(directory), m_path(directory + "/library.json") {
+      m_directory(directory), m_path(directory + "/library.json"),
+      m_authPath(directory + "/account.json") {
   QDir().mkpath(directory);
+  m_signedIn = QFileInfo::exists(m_authPath);
   m_save.setSingleShot(true);
   m_save.setInterval(250);
   connect(&m_save, &QTimer::timeout, this, &Youtube::persist);
@@ -116,7 +132,6 @@ Youtube::Youtube(const QString &directory, QObject *parent)
           [this] { cancel("play"); });
   connect(&m_player, &Player::trackChanged, this, [this] {
     m_recordedKey.clear();
-    m_audio.reset();
     cancel("prepare");
     m_save.start();
     loadArt();
@@ -126,8 +141,6 @@ Youtube::Youtube(const QString &directory, QObject *parent)
   connect(&m_player, &Player::queueChanged, this, [this] {
     m_save.start();
     cancel("prepare");
-    m_prepared.reset();
-    m_preparedKey.clear();
   });
   connect(&m_player, &Player::positionChanged, this, [this] {
     updateLyricIndex();
@@ -179,6 +192,11 @@ void Youtube::cancel(const QString &channel) {
   connect(p, &QProcess::finished, p, &QObject::deleteLater);
   if (p->state() == QProcess::NotRunning)
     p->deleteLater();
+}
+QVariantMap Youtube::withAuth(QVariantMap request) const {
+  if (m_signedIn && !m_authPath.isEmpty())
+    request.insert("auth", m_authPath);
+  return request;
 }
 void Youtube::request(const QString &channel, const QVariantMap &args,
                       Callback done, std::shared_ptr<QTemporaryDir> directory) {
@@ -249,11 +267,11 @@ void Youtube::setEnabled(bool enabled) {
   if (!enabled) {
     m_player.pause();
     cancel("prepare");
-    m_prepared.reset();
-    m_preparedKey.clear();
   } else {
     if (!m_checked)
       check();
+    if (m_signedIn && m_account.isEmpty())
+      refreshAccount();
     if (!m_player.trackKey().isEmpty() && m_player.artwork().isNull())
       loadArt();
   }
@@ -263,7 +281,7 @@ void Youtube::check() {
   m_checked = true;
   m_busy = true;
   emit changed();
-  request("browse", {{"op", "check"}}, [this](const auto &r) {
+  request("browse", withAuth({{"op", "check"}}), [this](const auto &r) {
     m_busy = false;
     m_ready = r.value("ok").toBool();
     m_error = m_ready
@@ -286,7 +304,7 @@ void Youtube::browse(const QVariantMap &requestData, const QString &title,
   m_error.clear();
   m_items.clear();
   emit changed();
-  request("browse", requestData, [this](const auto &r) {
+  request("browse", withAuth(requestData), [this](const auto &r) {
     m_busy = false;
     if (!r.value("ok").toBool()) {
       fail(r.value("error").toString());
@@ -337,6 +355,8 @@ void Youtube::show(const QString &page) {
     emit changed();
     return;
   }
+  if (page == "account" && m_signedIn && m_account.isEmpty() && m_enabled)
+    refreshAccount();
   localPage();
 }
 void Youtube::localPage() {
@@ -366,11 +386,34 @@ void Youtube::localPage() {
         m_items = p["items"].toList();
       }
     }
+  } else if (m_page == "account") {
+    m_items.clear();
+    if (m_signedIn) {
+      m_heading =
+          m_account.isEmpty() ? "YouTube Music account" : ("Signed in as " + m_account);
+      const auto section = [this](const QString &id, const QString &title) {
+        m_items.append(QVariantMap{{"id", id},
+                                   {"kind", "section"},
+                                   {"title", title},
+                                   {"artist", "From YouTube Music"}});
+      };
+      section("liked", "Liked songs");
+      section("playlists", "Your playlists");
+      section("albums", "Your albums");
+      section("artists", "Your artists");
+      section("subscriptions", "Subscriptions");
+    } else {
+      m_heading = "YouTube Music account";
+    }
   }
   emit changed();
 }
 void Youtube::open(const QVariantMap &row) {
   auto kind = row.value("kind").toString();
+  if (kind == "section") {
+    syncLibrary(row.value("id").toString());
+    return;
+  }
   if (kind == "local-playlist") {
     m_back.append(QVariantMap{
         {"items", m_items}, {"heading", m_heading}, {"page", m_page}});
@@ -388,6 +431,43 @@ void Youtube::open(const QVariantMap &row) {
   if (QStringList{"album", "artist", "playlist"}.contains(kind))
     browse({{"op", kind}, {"id", item["id"]}, {"limit", 5000}},
            item["title"].toString());
+}
+void Youtube::openAt(const QVariantMap &row, int index) {
+  // Playing a song inside a list (a playlist, album, liked songs, search…)
+  // should queue the whole list from that song, so Next/Previous, shuffle and
+  // autoplay walk the list instead of looping the single track.
+  const auto kind = row.value("kind").toString();
+  if (kind == "song" || kind == "video") {
+    QVariantList songs;
+    int start = 0;
+    for (int i = 0; i < m_items.size(); ++i) {
+      const auto k = m_items[i].toMap().value("kind").toString();
+      if (k != "song" && k != "video")
+        continue;
+      if (i == index)
+        start = songs.size();
+      songs.append(m_items[i]);
+    }
+    if (songs.size() > 1) {
+      playItems(songs, start);
+      return;
+    }
+  }
+  open(row);
+}
+void Youtube::shufflePlay() {
+  QVariantList songs;
+  for (const auto &v : m_items) {
+    const auto k = v.toMap().value("kind").toString();
+    if (k == "song" || k == "video")
+      songs.append(v);
+  }
+  if (songs.isEmpty()) {
+    fail("Nothing here to shuffle.");
+    return;
+  }
+  m_player.setShuffle(true);
+  playItems(songs, QRandomGenerator::global()->bounded(int(songs.size())));
 }
 void Youtube::back() {
   if (m_back.isEmpty())
@@ -472,43 +552,46 @@ void Youtube::loadCurrent() {
   const auto row = current();
   if (row.isEmpty())
     return;
-  if (key == m_preparedKey && m_prepared) {
-    auto directory = std::move(m_prepared);
-    m_preparedKey.clear();
-    const auto files = QDir(directory->path()).entryList(QDir::Files);
-    if (!files.isEmpty()) {
-      m_player.resolveExternal(
-          key, QUrl::fromLocalFile(directory->path() + "/" + files.first()));
-      m_audio = directory;
-      return;
-    }
-  }
-  auto directory = std::make_shared<QTemporaryDir>(QDir::tempPath() +
-                                                   "/spun-youtube-XXXXXX");
-  if (!directory->isValid()) {
-    m_player.failExternal(key, "Could not create the YouTube playback buffer.");
+  const auto id = row.value("id").toString();
+  const auto now = QDateTime::currentSecsSinceEpoch();
+  // Serve a cached, still-fresh stream URL immediately (e.g. one prepared for
+  // the next track) so playback starts without another round trip.
+  const auto cached = m_streamCache.value(id);
+  if (playableSource(cached.url) && now - cached.at < kStreamTtlSeconds) {
+    m_player.resolveExternal(key, cached.url);
     return;
   }
   request(
-      "play",
-      {{"op", "buffer"}, {"id", row["id"]}, {"directory", directory->path()}},
-      [this, key, directory](const auto &r) {
+      "play", withAuth({{"op", "stream"}, {"id", id}}),
+      [this, key, id](const auto &r) {
         if (key != m_player.trackKey() || !m_enabled)
           return;
-        const auto file =
-            QFileInfo(r.value("file").toString()).canonicalFilePath();
-        if (!r.value("ok").toBool() || file.isEmpty() ||
-            !file.startsWith(directory->path() + "/")) {
+        const QUrl url(r.value("url").toString());
+        if (!r.value("ok").toBool() || !playableSource(url)) {
+          m_streamCache.remove(id);
+          // Prefer the helper's specific, actionable message (bot check, region,
+          // access) over a generic one.
+          const auto helperError = r.value("error").toString();
+          const bool specific =
+              !helperError.isEmpty() &&
+              helperError != QStringLiteral("YouTube could not complete this "
+                                            "request.");
           m_player.failExternal(
-              key, "Could not play this song anonymously. It may be "
-                   "unavailable, restricted, or YouTube may need a resolver "
-                   "update. Try another song or retry.");
+              key, specific ? helperError
+                   : m_signedIn
+                       ? "Could not play this song. It may be unavailable or "
+                         "region-restricted, your sign-in may have expired, or "
+                         "YouTube may need a resolver update. Try another song "
+                         "or sign in again."
+                       : "Could not play this song anonymously. It may be "
+                         "unavailable, restricted, or YouTube may need a "
+                         "resolver update. Sign in on the Account tab, try "
+                         "another song, or retry.");
           return;
         }
-        m_player.resolveExternal(key, QUrl::fromLocalFile(file));
-        m_audio = directory;
-      },
-      directory);
+        m_streamCache.insert(id, {url, QDateTime::currentSecsSinceEpoch()});
+        m_player.resolveExternal(key, url);
+      });
 }
 void Youtube::prepareNext() {
   if (!m_enabled || m_player.shuffle() || m_player.repeatMode() == 2)
@@ -517,29 +600,23 @@ void Youtube::prepareNext() {
   const auto next = m_player.currentIndex() + 1;
   if (next >= rows.size())
     return;
-  const auto row = rows[next].toMap();
-  const auto key = keyFor(row.value("id").toString());
-  if (key == m_preparedKey)
+  const auto id = rows[next].toMap().value("id").toString();
+  if (id.isEmpty())
     return;
-  auto directory = std::make_shared<QTemporaryDir>(QDir::tempPath() +
-                                                   "/spun-youtube-XXXXXX");
-  if (!directory->isValid())
+  const auto now = QDateTime::currentSecsSinceEpoch();
+  const auto cached = m_streamCache.value(id);
+  if (playableSource(cached.url) && now - cached.at < kStreamTtlSeconds)
     return;
   const auto currentKey = m_player.trackKey();
-  request(
-      "prepare",
-      {{"op", "buffer"}, {"id", row["id"]}, {"directory", directory->path()}},
-      [this, key, currentKey, directory](const auto &r) {
-        if (!m_enabled || m_player.trackKey() != currentKey ||
-            !r.value("ok").toBool())
-          return;
-        auto file = QFileInfo(r.value("file").toString()).canonicalFilePath();
-        if (!file.startsWith(directory->path() + "/"))
-          return;
-        m_preparedKey = key;
-        m_prepared = directory;
-      },
-      directory);
+  request("prepare", withAuth({{"op", "stream"}, {"id", id}}),
+          [this, id, currentKey](const auto &r) {
+            if (!m_enabled || m_player.trackKey() != currentKey ||
+                !r.value("ok").toBool())
+              return;
+            const QUrl url(r.value("url").toString());
+            if (playableSource(url))
+              m_streamCache.insert(id, {url, QDateTime::currentSecsSinceEpoch()});
+          });
 }
 void Youtube::loadArt() {
   if (m_artReply) {
@@ -724,6 +801,97 @@ void Youtube::copyLink(const QVariantMap &item) {
 void Youtube::openClipboardLink() {
   search(QGuiApplication::clipboard()->text());
 }
+void Youtube::signIn(const QString &headers) {
+  if (m_busy)
+    return;
+  m_authError.clear();
+  if (headers.trimmed().isEmpty()) {
+    m_authError = "Paste the request headers copied from music.youtube.com.";
+    emit changed();
+    return;
+  }
+  m_busy = true;
+  emit changed();
+  // Cap the pasted headers so a runaway paste cannot flood the helper stdin.
+  request("auth",
+          {{"op", "browser_login"},
+           {"headers", headers.left(65000)},
+           {"auth", m_authPath}},
+          [this](const auto &r) {
+            m_busy = false;
+            if (!r.value("ok").toBool()) {
+              m_authError = r.value("error").toString();
+              emit changed();
+              return;
+            }
+            m_signedIn = true;
+            m_account = r.value("account").toMap().value("name").toString();
+            emit changed();
+            emit feedback("Signed in to YouTube Music", false);
+            if (m_page == "account")
+              localPage();
+          });
+}
+void Youtube::signOut() {
+  cancel("auth");
+  m_busy = false;
+  QFile::remove(m_authPath);
+  m_signedIn = false;
+  m_account.clear();
+  m_authError.clear();
+  emit feedback("Signed out of YouTube Music", false);
+  if (m_page == "account")
+    localPage();
+  else
+    emit changed();
+}
+void Youtube::refreshAccount() {
+  if (!m_signedIn)
+    return;
+  request("account", {{"op", "account"}, {"auth", m_authPath}},
+          [this](const auto &r) {
+            if (!r.value("ok").toBool())
+              return;
+            m_account = r.value("account").toMap().value("name").toString();
+            if (m_page == "account")
+              localPage();
+            else
+              emit changed();
+          });
+}
+void Youtube::syncLibrary(const QString &kind) {
+  static const QStringList kinds{"liked", "playlists", "albums", "artists",
+                                 "subscriptions"};
+  if (!m_signedIn || !kinds.contains(kind))
+    return;
+  static const QHash<QString, QString> titles{
+      {"liked", "Liked songs"},        {"playlists", "Your playlists"},
+      {"albums", "Your albums"},        {"artists", "Your artists"},
+      {"subscriptions", "Subscriptions"}};
+  browse({{"op", "library"}, {"kind", kind}, {"limit", 5000}},
+         titles.value(kind));
+}
+void Youtube::likeOnYoutube(const QVariantMap &item, bool like) {
+  if (!m_signedIn)
+    return;
+  const auto row = cleanItem(item);
+  if (!videoId(row.value("id").toString()))
+    return;
+  request("rate",
+          {{"op", "rate"},
+           {"id", row["id"]},
+           {"like", like},
+           {"auth", m_authPath}},
+          [this, like](const auto &r) {
+            if (!r.value("ok").toBool()) {
+              fail(r.value("error").toString());
+              return;
+            }
+            emit feedback(like ? "Liked on YouTube Music"
+                               : "Removed like on YouTube Music",
+                          false);
+          });
+}
 void Youtube::persist() {
   QSet<QString> keys;
   for (const auto &v : m_player.queue())
@@ -780,7 +948,7 @@ void Youtube::refresh() {
   m_lyricsLoading = true;
   emit changed();
   const auto key = m_player.trackKey();
-  request("lyrics", {{"op", "lyrics"}, {"id", current()["id"]}},
+  request("lyrics", withAuth({{"op", "lyrics"}, {"id", current()["id"]}}),
           [this, key](const auto &r) {
             if (key != m_player.trackKey() || !m_lyricsActive)
               return;
