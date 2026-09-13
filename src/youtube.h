@@ -17,8 +17,10 @@ class Youtube : public QObject {
   Q_PROPERTY(bool enabled READ enabled WRITE setEnabled NOTIFY changed)
   Q_PROPERTY(bool ready READ ready NOTIFY changed)
   Q_PROPERTY(bool busy READ busy NOTIFY changed)
+  Q_PROPERTY(bool buffering READ buffering NOTIFY changed)
   Q_PROPERTY(bool signedIn READ signedIn NOTIFY changed)
   Q_PROPERTY(QString account READ account NOTIFY changed)
+  Q_PROPERTY(QString currentLikeStatus READ currentLikeStatus NOTIFY changed)
   Q_PROPERTY(QString authError READ authError NOTIFY changed)
   Q_PROPERTY(QString error READ error NOTIFY changed)
   Q_PROPERTY(QString heading READ heading NOTIFY changed)
@@ -41,8 +43,10 @@ public:
   void setEnabled(bool enabled);
   bool ready() const { return m_ready; }
   bool busy() const { return m_busy; }
+  bool buffering() const { return m_buffering; }
   bool signedIn() const { return m_signedIn; }
   QString account() const { return m_account; }
+  QString currentLikeStatus() const { return m_currentLikeStatus; }
   QString authError() const { return m_authError; }
   QString error() const { return m_error; }
   QString heading() const { return m_heading; }
@@ -77,6 +81,7 @@ public:
   Q_INVOKABLE void signOut();
   Q_INVOKABLE void syncLibrary(const QString &kind);
   Q_INVOKABLE void likeOnYoutube(const QVariantMap &item, bool like);
+  Q_INVOKABLE void toggleCurrentLike();
   bool active() const { return m_lyricsActive; }
   void setActive(bool active);
   QVariantList lines() const { return m_lines; }
@@ -100,9 +105,11 @@ private:
   void cancel(const QString &channel);
   QVariantMap withAuth(QVariantMap request) const;
   void refreshAccount();
+  void refreshLikeStatus();
   void browse(const QVariantMap &request, const QString &title,
               bool remember = true);
   void loadCurrent();
+  void setBuffering(bool buffering);
   void loadArt();
   void prepareNext();
   void updateLyricIndex();
@@ -115,9 +122,9 @@ private:
   QString m_directory, m_path, m_authPath, m_heading = "YouTube Music",
                                m_page = "search", m_error;
   bool m_enabled = false, m_ready = false, m_busy = false, m_checked = false,
-       m_storageValid = true;
+       m_storageValid = true, m_buffering = false;
   bool m_signedIn = false;
-  QString m_account, m_authError;
+  QString m_account, m_authError, m_currentLikeStatus;
   QVariantList m_items, m_favorites, m_history, m_playlists, m_back;
   QHash<QString, QVariantMap> m_catalog;
   QHash<QString, QPointer<QProcess>> m_jobs;

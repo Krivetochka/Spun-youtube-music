@@ -45,9 +45,9 @@ ApplicationWindow {
     }
     visible: true
     readonly property bool wideMixer: tx6Visible && threeDRequested
-    readonly property real playerWidth: miniMode ? 300 : wideMixer ? 740 : 530
+    readonly property real playerWidth: miniMode ? 300 : wideMixer ? 740 : 564
     readonly property real mixerHeightExtra: wideMixer ? 64 : 0
-    readonly property real layoutWidth: playerWidth + (!miniMode && sideOpen ? 330 : 0)
+    readonly property real layoutWidth: playerWidth + (!miniMode && sideOpen ? 380 : 0)
     readonly property real miniBaseHeight: showHorizontalSeek ? 382 : 354
     readonly property real layoutHeight: miniMode ? miniBaseHeight + (actionNotice.visible ? 48 : 0)
         : Math.max(730 + mixerHeightExtra, actionNotice.visible ? actionNotice.y + actionNotice.height + 8 : 730)
@@ -653,14 +653,14 @@ ApplicationWindow {
         opacity: root.chromeHidden ? 0 : 1
         Behavior on opacity { NumberAnimation { duration: SpunStyle.feedback; easing.type: Easing.BezierSpline; easing.bezierCurve: SpunStyle.effectsCurve } }
         visible: !root.miniMode
-        x: (root.playerWidth - width) / 2; y: 13; width: platformNative.hyprland ? 504 : 512; height: 48; radius: 24
+        x: (root.playerWidth - width) / 2; y: 13; width: platformNative.hyprland ? 548 : 556; height: 48; radius: 24
         readonly property real tabWidth: platformNative.hyprland ? 80 : 64
         color: root.surface
         border.width: 0
         MouseArea { anchors.fill: parent; onPressed: root.startSystemMove() }
         Rectangle {
             objectName: "sourceIndicator"
-            SpunSpring { id: sourceMotion; targetValue: 56 + badge.tabWidth * (root.useSubsonic ? 4 : root.useJellyfin ? 3 : root.useYoutube ? 2 : root.useCider ? 1 : 0) }
+            SpunSpring { id: sourceMotion; targetValue: 100 + badge.tabWidth * (root.useSubsonic ? 4 : root.useJellyfin ? 3 : root.useYoutube ? 2 : root.useCider ? 1 : 0) }
             x: sourceMotion.value; y: 6; width: badge.tabWidth; height: 36; radius: 18
             color: root.inset
         }
@@ -670,7 +670,7 @@ ApplicationWindow {
                 const button = sourceTabItems.itemAt(Math.max(0, Math.min(4, index)))
                 if (button) button.forceActiveFocus(Qt.TabFocusReason)
             }
-            x: 56; y: 6; spacing: 0
+            x: 100; y: 6; spacing: 0
             Repeater {
                 id: sourceTabItems
                 model: ["Local", "Cider", "YouTube", "Jellyfin", "Subsonic"]
@@ -715,15 +715,16 @@ ApplicationWindow {
             selected: root.libraryOpen; fill: root.libraryOpen ? root.inset : "transparent"
             ink: root.libraryOpen ? root.accent : root.ink; hoverFill: root.hoverFill; onClicked: root.useCider || root.useYoutube || root.useServer ? root.openLibrary() : files.open()
         }
+        IconButton { id: menuButton; objectName: "menuButton"; x: 48; y: 4; glyphName: "more"; tip: "More actions"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: root.openSettings() }
         IconButton {
             objectName: "queueButton"
-            x: 60 + 5 * badge.tabWidth; y: 4; glyphName: "queue"; tip: "Queue · Ctrl+L"
+            x: 104 + 5 * badge.tabWidth; y: 4; glyphName: "queue"; tip: "Queue · Ctrl+L"
             selected: root.queueOpen; fill: root.queueOpen ? root.inset : "transparent"
             ink: root.queueOpen ? root.accent : root.ink; hoverFill: root.hoverFill
             onClicked: root.queueOpen = !root.queueOpen
         }
-        IconButton { visible: !platformNative.hyprland; x: 104 + 5 * badge.tabWidth; y: 4; glyphName: "minus"; tip: "Minimize"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: root.showMinimized() }
-        IconButton { visible: !platformNative.hyprland; x: 148 + 5 * badge.tabWidth; y: 4; glyphName: "close"; tip: "Close Spun"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: Qt.quit() }
+        IconButton { visible: !platformNative.hyprland; x: 148 + 5 * badge.tabWidth; y: 4; glyphName: "minus"; tip: "Minimize"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: root.showMinimized() }
+        IconButton { visible: !platformNative.hyprland; x: 192 + 5 * badge.tabWidth; y: 4; glyphName: "close"; tip: "Close Spun"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: Qt.quit() }
     }
 
     Item {
@@ -1439,6 +1440,8 @@ ApplicationWindow {
         visible: !root.miniMode
         x: (root.playerWidth - width) / 2; y: 533 + root.mixerHeightExtra; width: 406; height: 144 + (root.showHorizontalSeek ? 28 : 0); radius: SpunStyle.panelRadius
         color: root.surface; border.width: 0
+        // A signed-in YouTube song is playing: show its like state next to volume.
+        readonly property bool ytLike: root.useYoutube && youtube.signedIn && !!(youtube.current && youtube.current.id)
         MouseArea { anchors.fill: parent; onPressed: root.startSystemMove() }
         SpunText {
             id: playerSongTitle; objectName: "songTitle"
@@ -1447,11 +1450,12 @@ ApplicationWindow {
             font.pixelSize: SpunStyle.title; font.weight: Font.Normal
         }
         IconButton {
+            id: currentActionsBtn
             objectName: "currentSongActions"
             visible: root.useCider || root.useYoutube || root.useServer; enabled: root.deckPlayer.count > 0
             x: 264; y: 12; width: 40; height: 40
             glyphName: "more"; tip: "Song actions"; ink: root.mutedInk; hoverFill: root.hoverFill
-            onClicked: { if(root.useServer){root.libraryOpen=true;Qt.callLater(function(){if(serverBrowser.item)serverBrowser.item.menuFor(serverLibrary.current,-1)});return}; if(root.useYoutube){root.libraryOpen=true;Qt.callLater(function(){if(youtubeBrowser.item)youtubeBrowser.item.menuFor(youtube.current,-1)});return}; menu.close(); songMenu.x = deck.x + deck.width - songMenu.width; songMenu.y = Qt.binding(function() { return deck.y - songMenu.height - 8 }); songMenu.open() }
+            onClicked: { if(root.useServer){root.libraryOpen=true;Qt.callLater(function(){if(serverBrowser.item)serverBrowser.item.menuFor(serverLibrary.current,-1,currentActionsBtn)});return}; if(root.useYoutube){root.libraryOpen=true;Qt.callLater(function(){if(youtubeBrowser.item)youtubeBrowser.item.menuFor(youtube.current,-1,currentActionsBtn)});return}; menu.close(); songMenu.x = deck.x + deck.width - songMenu.width; songMenu.y = Qt.binding(function() { return deck.y - songMenu.height - 8 }); songMenu.open() }
         }
         AbstractButton {
             id: playerArtist
@@ -1513,17 +1517,19 @@ ApplicationWindow {
             }
         }
 
-        IconButton { x: 256; y: 84 + (root.showHorizontalSeek ? 28 : 0); glyphName: root.deckPlayer.volume > 0 ? "volume" : "mute"; tip: "Mute · M"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: root.toggleMute() }
+        IconButton { objectName: "currentLikeButton"; visible: deck.ytLike; x: 256; y: 84 + (root.showHorizontalSeek ? 28 : 0)
+            glyphName: youtube.currentLikeStatus === "LIKE" ? "heart_filled" : "heart"
+            tip: youtube.currentLikeStatus === "LIKE" ? "Liked on YouTube — tap to remove" : "Like on YouTube Music"
+            ink: youtube.currentLikeStatus === "LIKE" ? root.accent : root.mutedInk; hoverFill: root.hoverFill; onClicked: youtube.toggleCurrentLike() }
+        IconButton { x: (deck.ytLike ? 300 : 256); y: 84 + (root.showHorizontalSeek ? 28 : 0); glyphName: root.deckPlayer.volume > 0 ? "volume" : "mute"; tip: "Mute · M"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: root.toggleMute() }
         SpunSlider {
             id: volumeSlider
             objectName: "volumeSlider"
-            x: 300; y: 86 + (root.showHorizontalSeek ? 28 : 0); width: 44; height: 36
+            x: (deck.ytLike ? 344 : 300); y: 86 + (root.showHorizontalSeek ? 28 : 0); width: 44; height: 36
             from: 0; to: 1; stepSize: .05; value: root.deckPlayer.volume
             onMoved: root.deckPlayer.volume = value
             Accessible.name: "Volume"
         }
-
-        IconButton { id: menuButton; objectName: "menuButton"; x: 350; y: 84 + (root.showHorizontalSeek ? 28 : 0); glyphName: "more"; tip: "More actions"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: root.openSettings() }
 
     }
 
@@ -1539,7 +1545,7 @@ ApplicationWindow {
     Rectangle {
         id: jewelCase
         objectName: "queuePanel"
-        x: root.playerWidth + 4; width: 310; anchors.top: badge.top; anchors.bottom: deck.bottom; radius: SpunStyle.panelRadius
+        x: root.playerWidth + 4; width: 360; anchors.top: badge.top; anchors.bottom: deck.bottom; radius: SpunStyle.panelRadius
         visible: root.queueOpen; color: root.surface; border.width: 0
         transform: Translate { id: queueEntrance; x: 0 }
         onVisibleChanged: {
@@ -2164,6 +2170,21 @@ ApplicationWindow {
             onClicked: { menuButton.forceActiveFocus(Qt.TabFocusReason); player.cancelImport() }
         }
         IconButton { id: noticeDismiss; objectName: "dismissActionNotice"; visible: !actionNotice.importing; anchors.right: parent.right; anchors.rightMargin: 4; anchors.verticalCenter: parent.verticalCenter; glyphName: "close"; tip: "Dismiss"; ink: root.mutedInk; hoverFill: root.hoverFill; onClicked: actionNotice.dismiss() }
+    }
+    Rectangle {
+        id: youtubeLoadingNotice
+        objectName: "youtubeLoadingNotice"
+        // A signed-in/anonymous YouTube stream URL is being fetched: the transport
+        // reads as playing but the position is stuck, so tell the user it's loading.
+        readonly property bool shown: root.useYoutube && youtube.buffering && !actionNotice.visible
+        visible: (shown || opacity > 0) && !root.miniMode
+        opacity: shown && !root.miniMode ? 1 : 0
+        Behavior on opacity { NumberAnimation { duration: SpunStyle.feedback; easing.type: Easing.BezierSpline; easing.bezierCurve: SpunStyle.effectsCurve } }
+        Accessible.role: Accessible.StaticText; Accessible.name: "Loading song from YouTube"
+        z: 30; x: deck.x; y: deck.y + deck.height + 8; width: deck.width; height: 40; radius: SpunStyle.rowRadius
+        color: root.surface
+        SpunText { x: 12; anchors.verticalCenter: parent.verticalCenter; width: ytNoticeBar.x - x - 12; text: "Loading song from YouTube…"; color: root.ink; font.pixelSize: SpunStyle.body; elide: Text.ElideRight }
+        SpunLoading { id: ytNoticeBar; anchors.right: parent.right; anchors.rightMargin: 16; anchors.verticalCenter: parent.verticalCenter; width: 96; label: "Loading song from YouTube" }
     }
     function focusFirstMenuItem(popup) {
         for (let i = 0; i < popup.count; ++i) {

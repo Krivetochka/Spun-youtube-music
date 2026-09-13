@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Controls
+import QtQuick.Window
 
 Rectangle {
     id: panel
@@ -30,7 +31,17 @@ Rectangle {
     }
     readonly property string selectedPage: playlistPage ? "playlists" : ["favorites", "playlists", "history", "account"].includes(youtube.page) ? youtube.page : "search"
     Connections { target: youtube; function onChanged(){ panel.revision++; list.currentIndex=-1 } }
-    function menuFor(row,index) { selected=row; selectedIndex=index; actions.open() }
+    function menuFor(row,index,item) {
+        selected=row; selectedIndex=index;
+        if (!item) { actions.open(); return }
+        // Open next to the clicked ⋮ button (right-aligned); flip above it when
+        // there isn't room below (e.g. the transport button at the window bottom).
+        var h = actions.height > 0 ? actions.height : 320
+        var top = item.mapToItem(null, 0, 0)
+        var win = item.Window.window
+        var up = win && (top.y + item.height + h > win.height - 8)
+        actions.popup(item, item.width - actions.width, up ? -h : item.height)
+    }
     function focusSearch() { search.forceActiveFocus(); search.selectAll() }
     function playAll() { youtube.playItems(youtube.items) }
 
@@ -126,7 +137,7 @@ Rectangle {
             }
             SpunText {x:62;y:12;width:parent.width-108;text:row.modelData.title;color:panel.app.ink;font.pixelSize:SpunStyle.body;elide:Text.ElideRight}
             SpunText {x:62;y:37;width:parent.width-108;text:row.modelData.artist || row.modelData.kind;color:panel.app.mutedInk;font.pixelSize:SpunStyle.caption;elide:Text.ElideRight}
-            IconButton {objectName:"youtubeRowMenu_"+row.index;x:parent.width-44;y:12;glyphName:"more";tip:"Song actions";ink:panel.app.mutedInk;onClicked:panel.menuFor(row.modelData,row.index)}
+            IconButton {id:rowMenu;objectName:"youtubeRowMenu_"+row.index;x:parent.width-44;y:12;glyphName:"more";tip:"Song actions";ink:panel.app.mutedInk;onClicked:panel.menuFor(row.modelData,row.index,rowMenu)}
         }
     }
     Column {
@@ -158,12 +169,10 @@ Rectangle {
         id: actions; width: 270
         enter: SpunPopupEnter {}
         exit: Transition { NumberAnimation { property: "opacity"; to: 0; duration: SpunStyle.exit } }
-        x: 30; y: Math.min(panel.height-height-16,230)
         background: Rectangle {color:SpunStyle.popup;radius:SpunStyle.popupRadius}
         Action {text:"Play";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:youtube.playItem(panel.selected)}
         Action {text:"Add to queue";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:youtube.enqueue(panel.selected)}
         Action {text:{panel.revision;return youtube.favorite(panel.selected.id||"")?"Remove from favorites":"Save to favorites"} visible:panel.selected.kind!=="local-playlist";height:visible?implicitHeight:0;onTriggered:youtube.toggleFavorite(panel.selected)}
-        Action {text:"Like on YouTube Music";visible:youtube.signedIn && (panel.selected.kind==="song"||panel.selected.kind==="video");height:visible?implicitHeight:0;onTriggered:youtube.likeOnYoutube(panel.selected,true)}
         Action {text:"Add to playlist…";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:playlistPicker.open()}
         Action {text:"Song radio";enabled:panel.selected.kind==="song"||panel.selected.kind==="video";onTriggered:youtube.radio(panel.selected)}
         Action {text:"Open album";enabled:!!panel.selected.albumId;onTriggered:youtube.open({id:panel.selected.albumId,kind:"album",title:panel.selected.album})}

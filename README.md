@@ -23,8 +23,7 @@ and a self‑contained AppImage.</p>
 Play local music, connect to Jellyfin, Navidrome or Subsonic, control Apple Music
 through Cider, or use **your own YouTube&nbsp;Music account**. Spun puts your album
 artwork on a spinning CD, vinyl record, cassette or TP‑7‑inspired recorder, with an
-interface inspired by Material Design 3. Optional 3D players add physical depth and
-lighting that follows Noctalia's wallpaper palette.
+interface inspired by Material Design 3. A description of all the features is available [here](https://github.com/yappologistic/Spun/blob/main/README.md).
 
 **Source‑available · PolyForm Noncommercial 1.0.0.** Personal and other permitted
 noncommercial use is free. This is not an OSI‑approved open‑source license.
@@ -32,7 +31,7 @@ noncommercial use is free. This is not an OSI‑approved open‑source license.
 
 ## What this fork adds
 
-- **Sign in to your YouTube Music account** from the **Account** tab and browse your
+- **Sign in to your YouTube Music account** from the **Account** tab, then browse and play your
   own **liked songs, playlists, albums, artists and subscriptions** — not just the
   anonymous catalogue.
 - **Write‑back:** **Like on YouTube Music** from a song's menu.
@@ -44,6 +43,7 @@ noncommercial use is free. This is not an OSI‑approved open‑source license.
   Python with `ytmusicapi`/`yt‑dlp`, the `bgutil` PO‑token provider, Node and
   Deno. Native Wayland is included, with an XWayland/xcb fallback.
 
+ Tested on Arch KDE and Fedora Gnome.
 ## Install
 
 ### AppImage (recommended)

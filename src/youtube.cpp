@@ -136,6 +136,7 @@ Youtube::Youtube(const QString &directory, QObject *parent)
     m_save.start();
     loadArt();
     refresh();
+    refreshLikeStatus();
     emit changed();
   });
   connect(&m_player, &Player::queueChanged, this, [this] {
@@ -272,6 +273,8 @@ void Youtube::setEnabled(bool enabled) {
       check();
     if (m_signedIn && m_account.isEmpty())
       refreshAccount();
+    if (m_signedIn && m_currentLikeStatus.isEmpty())
+      refreshLikeStatus();
     if (!m_player.trackKey().isEmpty() && m_player.artwork().isNull())
       loadArt();
   }
@@ -543,29 +546,43 @@ void Youtube::radio(const QVariantMap &row) {
     return;
   browse({{"op", "radio"}, {"id", item["id"]}}, "Song radio");
 }
+void Youtube::setBuffering(bool buffering) {
+  if (m_buffering == buffering)
+    return;
+  m_buffering = buffering;
+  emit changed();
+}
 void Youtube::loadCurrent() {
   if (!m_enabled) {
+    setBuffering(false);
     m_player.pause();
     return;
   }
   const auto key = m_player.trackKey();
   const auto row = current();
-  if (row.isEmpty())
+  if (row.isEmpty()) {
+    setBuffering(false);
     return;
+  }
   const auto id = row.value("id").toString();
   const auto now = QDateTime::currentSecsSinceEpoch();
   // Serve a cached, still-fresh stream URL immediately (e.g. one prepared for
   // the next track) so playback starts without another round trip.
   const auto cached = m_streamCache.value(id);
   if (playableSource(cached.url) && now - cached.at < kStreamTtlSeconds) {
+    setBuffering(false);
     m_player.resolveExternal(key, cached.url);
     return;
   }
+  // No fresh URL yet: fetch it from YouTube. Surface this wait to the UI so the
+  // idle transport (playing, but position stuck at 0) reads as "loading".
+  setBuffering(true);
   request(
       "play", withAuth({{"op", "stream"}, {"id", id}}),
       [this, key, id](const auto &r) {
         if (key != m_player.trackKey() || !m_enabled)
           return;
+        setBuffering(false);
         const QUrl url(r.value("url").toString());
         if (!r.value("ok").toBool() || !playableSource(url)) {
           m_streamCache.remove(id);
@@ -828,17 +845,20 @@ void Youtube::signIn(const QString &headers) {
             m_account = r.value("account").toMap().value("name").toString();
             emit changed();
             emit feedback("Signed in to YouTube Music", false);
+            refreshLikeStatus();
             if (m_page == "account")
               localPage();
           });
 }
 void Youtube::signOut() {
   cancel("auth");
+  cancel("like");
   m_busy = false;
   QFile::remove(m_authPath);
   m_signedIn = false;
   m_account.clear();
   m_authError.clear();
+  m_currentLikeStatus.clear();
   emit feedback("Signed out of YouTube Music", false);
   if (m_page == "account")
     localPage();
@@ -875,16 +895,64 @@ void Youtube::likeOnYoutube(const QVariantMap &item, bool like) {
   if (!m_signedIn)
     return;
   const auto row = cleanItem(item);
-  if (!videoId(row.value("id").toString()))
+  const auto id = row.value("id").toString();
+  if (!videoId(id))
     return;
   request("rate",
-          {{"op", "rate"},
-           {"id", row["id"]},
-           {"like", like},
-           {"auth", m_authPath}},
-          [this, like](const auto &r) {
+          {{"op", "rate"}, {"id", id}, {"like", like}, {"auth", m_authPath}},
+          [this, like, id](const auto &r) {
             if (!r.value("ok").toBool()) {
               fail(r.value("error").toString());
+              return;
+            }
+            // Keep the now-playing indicator in sync when this is the current song.
+            if (current().value("id").toString() == id) {
+              m_currentLikeStatus = like ? "LIKE" : "INDIFFERENT";
+              emit changed();
+            }
+            emit feedback(like ? "Liked on YouTube Music"
+                               : "Removed like on YouTube Music",
+                          false);
+          });
+}
+void Youtube::refreshLikeStatus() {
+  cancel("like");
+  const auto id = current().value("id").toString();
+  const bool clearable = !m_currentLikeStatus.isEmpty();
+  if (!m_signedIn || !videoId(id)) {
+    if (clearable) {
+      m_currentLikeStatus.clear();
+      emit changed();
+    }
+    return;
+  }
+  const auto key = m_player.trackKey();
+  request("like", withAuth({{"op", "like_status"}, {"id", id}}),
+          [this, key](const auto &r) {
+            if (key != m_player.trackKey())
+              return;
+            if (r.value("ok").toBool()) {
+              m_currentLikeStatus = r.value("status").toString();
+              emit changed();
+            }
+          });
+}
+void Youtube::toggleCurrentLike() {
+  const auto id = current().value("id").toString();
+  if (!m_signedIn || !videoId(id))
+    return;
+  const bool like = m_currentLikeStatus != "LIKE";
+  m_currentLikeStatus = like ? "LIKE" : "INDIFFERENT"; // optimistic
+  emit changed();
+  const auto key = m_player.trackKey();
+  request("rate", withAuth({{"op", "rate"}, {"id", id}, {"like", like}}),
+          [this, key, like](const auto &r) {
+            if (!r.value("ok").toBool()) {
+              fail(r.value("error").toString().isEmpty()
+                       ? "Could not update the like on YouTube."
+                       : r.value("error").toString());
+              if (key == m_player.trackKey())
+                refreshLikeStatus();
               return;
             }
             emit feedback(like ? "Liked on YouTube Music"

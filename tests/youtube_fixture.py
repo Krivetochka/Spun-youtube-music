@@ -45,4 +45,5 @@ elif op=='library':
     elif kind=='albums':result['items']=[dict(id='MPREfixture',kind='album',title='The first mixtape',artist='Spun Sound Lab')]
     else:result['items']=[song(1),song(2)]
 elif op=='rate':result['rated']=True
+elif op=='like_status':result['status']='LIKE'
 print(json.dumps(result))

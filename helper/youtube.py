@@ -469,6 +469,16 @@ def run(req):
             raise ValueError('Invalid YouTube song')
         api.rate_song(vid, 'LIKE' if req.get('like') else 'INDIFFERENT')
         return {'rated': True}
+    if op == 'like_status':
+        if not account:
+            return {'status': ''}
+        vid = req.get('id', '')
+        if not re.fullmatch(r'[A-Za-z0-9_-]{11}', vid):
+            raise ValueError('Invalid YouTube song')
+        data = api.get_watch_playlist(videoId=vid, limit=1)
+        tracks = data.get('tracks') or []
+        status = (tracks[0].get('likeStatus') if tracks else '') or ''
+        return {'status': status}
     if op == 'home':
         return {'sections': [{'title': s.get('title', ''), 'items': clean(s.get('contents', []))}
                              for s in api.get_home(limit=5) if s.get('contents')]}

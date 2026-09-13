@@ -111,7 +111,10 @@ public:
     QVariantList queue() const;
     int count() const { return m_tracks.size(); }
     int currentIndex() const { return m_index; }
-    bool playing() const { return m_externalWantPlay || m_playPending || (m_media && m_media->playbackState() == QMediaPlayer::PlayingState); }
+    // While an external (YouTube) stream URL is still being fetched, m_externalWantPlay
+    // is set but there is no audio yet and the clock is stuck. Report "not playing" so
+    // the disc animation and play/pause button read as paused until the stream resolves.
+    bool playing() const { return m_playPending || (m_media && m_media->playbackState() == QMediaPlayer::PlayingState); }
     QMediaPlayer::PlaybackState playbackState() const { return (m_externalWantPlay || m_playPending) ? QMediaPlayer::PlayingState : m_media ? m_media->playbackState() : QMediaPlayer::StoppedState; }
     qint64 position() const { return m_restorePosition >= 0 ? m_restorePosition : m_media ? m_media->position() : 0; }
     qint64 duration() const { return m_media && m_media->duration() > 0 ? m_media->duration() : m_index >= 0 ? m_tracks[m_index].duration : 0; }
