@@ -43,7 +43,6 @@ noncommercial use is free. This is not an OSI‑approved open‑source license.
   Python with `ytmusicapi`/`yt‑dlp`, the `bgutil` PO‑token provider, Node and
   Deno. Native Wayland is included, with an XWayland/xcb fallback.
 
- Tested on Arch KDE and Fedora Gnome.
 ## Install
 
 ### AppImage (recommended)
@@ -59,6 +58,8 @@ It bundles everything the YouTube features need; the only extra requirement is a
 signed‑in web browser to authenticate with your account (see below). Running an
 AppImage needs `libfuse2` on your system; if it is unavailable, run
 `./Spun-x86_64.AppImage --appimage-extract-and-run`.
+
+Tested on Arch KDE and Fedora Gnome.
 
 ### Build from source
 
