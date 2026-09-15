@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """One request per process. No server, browser, telemetry, or idle worker.
 
-Anonymous by default. When the caller passes an ``auth`` path pointing at an
-account file written by the OAuth flow below, the same helper signs its
-requests with that account so the personal library becomes reachable. The
-account file stays local; nothing is uploaded and no worker is kept alive.
+Signed-in only. The caller passes an ``auth`` path to an account file written at
+sign-in (pasted request headers from music.youtube.com). Because YouTube rotates
+those cookies daily, the helper re-reads the current cookies from the user's
+browser on demand and rewrites the saved snapshot, so a single sign-in keeps
+working without re-pasting headers — the same idea as Metrolist reusing one
+stored login. Anonymous use is not offered: browsing needs a session and
+anonymous playback is blocked. The account file stays local; nothing is
+uploaded and no worker is kept alive.
 """
 import json
 import os
@@ -15,6 +19,36 @@ from urllib.parse import urlparse, parse_qs
 # Google OAuth scope for YouTube (Music). The client id/secret are supplied by
 # the user (their own "TVs and Limited Input devices" OAuth client) and stored
 # alongside the token in the account file, so no shared secret ships with Spun.
+
+
+# InnerTube clients yt-dlp resolves through (all carry the account cookies, so
+# playback stays tied to the signed-in account). The music client alone is fast
+# — one player request, one PO token — and covers the common case. When YouTube
+# intermittently challenges it with "not a bot", the fallbacks (a different web
+# fingerprint, mobile, and TV) are tried in turn; the TV client needs no PO
+# token at all. Escalating only on failure keeps normal playback snappy.
+PRIMARY_CLIENTS = ['web_music']
+FALLBACK_CLIENTS = ['web_safari', 'mweb', 'tv']
+
+
+def playback_extractor_args(clients):
+    """extractor_args for a stream/buffer request: the given clients + PO token.
+
+    Prefer a cached, still-valid PO token (fast: no per-song token generation);
+    fall back to the bgutil script provider, which yt-dlp invokes on demand."""
+    yt = {'player_client': list(clients)}
+    args = {'youtube': yt}
+    vd, tok = cached_pot()
+    if vd and tok:
+        yt['visitor_data'] = [vd]
+        # The gvs (streaming) token is bound to the visitor data, not the client,
+        # so the same token serves every web/mobile client we try.
+        yt['po_token'] = [f'{c}.gvs+{tok}' for c in clients]
+    else:
+        pot = pot_script_path()
+        if pot:
+            args['youtubepot-bgutilscript'] = {'script_path': [pot]}
+    return args
 
 
 class SafeError(Exception):
@@ -127,6 +161,7 @@ def detect_cookies_browser():
     import glob
     override = os.environ.get('SPUN_YOUTUBE_COOKIES_BROWSER', '').strip().lower()
     if override:
+        override = override.split(':', 1)[0].strip()  # drop any :profile suffix
         return '' if override in ('none', 'off') else override
     home = os.path.expanduser('~')
     candidates = [
@@ -155,6 +190,80 @@ def detect_cookies_browser():
     return ''
 
 
+def cookies_from_browser():
+    """yt-dlp's (browser, profile, keyring, container) tuple, or None when
+    disabled. SPUN_YOUTUBE_COOKIES_BROWSER may name a profile after ':'
+    (e.g. 'chromium:spun'): a dedicated login you never actively browse rotates
+    far less than your main session, so YouTube challenges it much less often."""
+    name = detect_cookies_browser()
+    if not name:
+        return None
+    override = os.environ.get('SPUN_YOUTUBE_COOKIES_BROWSER', '').strip()
+    profile = override.split(':', 1)[1].strip() or None if ':' in override else None
+    return (name, profile, None, None)
+
+
+def browser_cookie_header():
+    """Live YouTube Cookie header read straight from the browser profile, or ''.
+
+    This is what keeps a session fresh without re-pasting headers: the browser
+    rotates the account cookies, and we read their current values on demand (the
+    same idea as Metrolist reusing one stored WebView login). Returns '' when no
+    browser is readable or the profile is signed out (no SAPISID to sign with)."""
+    source = cookies_from_browser()
+    if not source:
+        return ''
+    name, profile = source[0], source[1]
+
+    class _Quiet:  # yt-dlp calls debug/info/warning/error on its logger.
+        def debug(self, *a, **k):
+            pass
+        info = warning = error = debug
+    try:
+        from yt_dlp.cookies import extract_cookies_from_browser
+        jar = extract_cookies_from_browser(name, profile=profile, logger=_Quiet())
+    except Exception:
+        return ''
+    parts, signed_in = [], False
+    for cookie in jar:
+        if not cookie.domain or 'youtube.com' not in cookie.domain or not cookie.value:
+            continue
+        parts.append(f'{cookie.name}={cookie.value}')
+        if cookie.name in ('SAPISID', '__Secure-3PAPISID'):
+            signed_in = True
+    return '; '.join(parts) if signed_in else ''
+
+
+def refresh_account(req):
+    """Return the stored account with its cookies refreshed from the live browser
+    session, or None when signed out.
+
+    YouTube rotates account cookies aggressively — a saved snapshot can go stale
+    within minutes, which shows up as a "sign in" page on library calls. Reading
+    the browser's current cookies is cheap (~0.1s), so we do it on every call and
+    rewrite the saved snapshot; a single sign-in then keeps working as long as the
+    browser stays logged in, with no re-paste. Set SPUN_YOUTUBE_COOKIES_BROWSER=
+    none to disable and pin the snapshot instead."""
+    account = load_account(req.get('auth'))
+    if account is None:
+        return None
+    cookie = browser_cookie_header()
+    if not cookie or cookie == account_cookie(account):
+        return account
+    auth = dict(account.get('auth') or {})
+    for key in list(auth):
+        if key.lower() == 'cookie':
+            auth[key] = cookie
+            break
+    else:
+        auth['cookie'] = cookie
+    try:
+        store_account(auth_path, auth)
+    except Exception:
+        pass
+    return {'version': 2, 'type': 'browser', 'auth': auth}
+
+
 def pot_script_path():
     """Path to the built bgutil PO-token generator, or '' when not installed."""
     default = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
@@ -163,17 +272,116 @@ def pot_script_path():
     return path if path and os.path.isfile(path) else ''
 
 
+def pot_cache_path():
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), 'spun-youtube-pot-%d.json' % os.getuid())
+
+
+def invalidate_pot():
+    """Drop the cached PO token (call after a bot-check so the next play regens)."""
+    try:
+        os.unlink(pot_cache_path())
+    except OSError:
+        pass
+
+
+def pot_is_cached(margin=600):
+    """True when a still-valid PO token is cached (a cheap read, never generates)."""
+    import time
+    import json as _json
+    try:
+        with open(pot_cache_path(), encoding='utf8') as file:
+            data = _json.load(file)
+        return bool(data.get('po_token')) and \
+            time.time() < float(data.get('expires_epoch', 0)) - margin
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def prewarm_pot():
+    """Generate the PO token in a detached process so it's cached before the first
+    song plays. No-op when one is already cached. Fire-and-forget."""
+    if pot_is_cached():
+        return
+    try:
+        import subprocess
+        import sys
+        proc = subprocess.Popen(
+            [sys.executable, os.path.abspath(__file__)],
+            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True)
+        proc.stdin.write(json.dumps({'op': 'warmup'}).encode())
+        proc.stdin.close()
+    except Exception:
+        pass
+
+
+def cached_pot(margin=600):
+    """Return (visitor_data, po_token), reusing a cached bgutil token until it
+    nears expiry and generating a fresh one only when needed.
+
+    This is the speed win: the ~15s proof-of-origin computation runs once per
+    session instead of once per song (the same token is valid for hours, so we
+    cache it and hand it straight to yt-dlp — the way Metrolist reuses one
+    token). Returns (None, None) when generation isn't available; callers then
+    fall back to the per-request script provider."""
+    import time
+    import json as _json
+    path = pot_cache_path()
+    try:
+        with open(path, encoding='utf8') as file:
+            data = _json.load(file)
+        if data.get('po_token') and data.get('visitor_data') \
+                and time.time() < float(data.get('expires_epoch', 0)) - margin:
+            return data['visitor_data'], data['po_token']
+    except (OSError, ValueError, TypeError):
+        pass
+    script = pot_script_path()
+    import shutil
+    deno = os.environ.get('SPUN_YOUTUBE_DENO') or shutil.which('deno')
+    if not script or not deno:
+        return None, None
+    try:
+        import subprocess
+        from datetime import datetime
+        proc = subprocess.run([deno, 'run', '--no-check', '-A', script],
+                              input='{}', capture_output=True, text=True, timeout=90)
+        gen = None
+        for line in reversed(proc.stdout.splitlines()):
+            line = line.strip()
+            if line.startswith('{') and 'poToken' in line:
+                gen = _json.loads(line)
+                break
+        if not gen:
+            return None, None
+        vd, tok = gen.get('contentBinding'), gen.get('poToken')
+        if not vd or not tok:
+            return None, None
+        exp = gen.get('expiresAt', '')
+        try:
+            epoch = datetime.fromisoformat(exp.replace('Z', '+00:00')).timestamp()
+        except ValueError:
+            epoch = time.time() + 3600
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, 'w', encoding='utf8') as file:
+            _json.dump({'visitor_data': vd, 'po_token': tok,
+                        'expires_epoch': epoch}, file)
+        return vd, tok
+    except Exception:
+        return None, None
+
+
 def apply_playback_auth(opts, account):
     """Add cookies + PO-token options for a signed-in session to yt-dlp opts.
 
     Returns a temp cookie-file path to delete afterwards (or '')."""
     cookiefile = ''
-    if not account:
-        return cookiefile
-    browser = detect_cookies_browser()
+    # Live browser cookies first (always current); fall back to the saved
+    # snapshot, which refresh_account keeps fresh from the browser anyway.
+    browser = cookies_from_browser()
     if browser:
-        opts['cookiesfrombrowser'] = (browser, None, None, None)
-    else:
+        opts['cookiesfrombrowser'] = browser
+    elif account:
         cookie = account_cookie(account)
         if cookie:
             import tempfile
@@ -181,9 +389,7 @@ def apply_playback_auth(opts, account):
             os.close(handle)
             write_cookiefile(cookie, cookiefile)
             opts['cookiefile'] = cookiefile
-    pot = pot_script_path()
-    if pot:
-        opts['extractor_args'] = {'youtubepot-bgutilscript': {'script_path': [pot]}}
+    opts['extractor_args'] = playback_extractor_args(PRIMARY_CLIENTS + FALLBACK_CLIENTS)
     return cookiefile
 
 
@@ -258,10 +464,16 @@ def normalize_lyrics(data):
 
 def run(req):
     op = req.get('op', '')
+    if op == 'warmup':
+        # Detached pre-warm: generate and cache the PO token so playback is quick.
+        cached_pot()
+        return {'ok': True}
     if op == 'check':
         import ytmusicapi, yt_dlp, shutil
         if not shutil.which('node'):
             raise RuntimeError('Node.js is required for YouTube playback.')
+        # Kick off PO-token generation now so the first song doesn't wait ~15s.
+        prewarm_pot()
         return {'ready': True}
     if op == 'browser_login':
         # Browser (cookie) authentication: the user pastes the request headers
@@ -322,7 +534,7 @@ def run(req):
         # bgutil PO-token provider and current YouTube signature challenge need.
         # YouTube blocks anonymous extraction and serves SABR-only formats, so a
         # signed-in session (live browser cookies) plus a PO token is required.
-        cookiefile = apply_playback_auth(opts, load_account(req.get('auth')))
+        cookiefile = apply_playback_auth(opts, refresh_account(req))
         try:
             with yt_dlp.YoutubeDL(opts) as dl:
                 info = dl.extract_info('https://music.youtube.com/watch?v=' + vid, download=True)
@@ -344,19 +556,21 @@ def run(req):
         vid = req.get('id', '')
         if not re.fullmatch(r'[A-Za-z0-9_-]{11}', vid):
             raise ValueError('Invalid YouTube song')
+        # cachedir is left at yt-dlp's default so it can cache the player JS and
+        # signature solver between runs, shaving time off each resolution.
         base = dict(quiet=True, no_warnings=True, noplaylist=True,
                     format='bestaudio[ext=m4a]/bestaudio', socket_timeout=15,
-                    retries=1, extractor_retries=1, cachedir=False,
+                    retries=1, extractor_retries=1,
                     skip_download=True)
-        pot = pot_script_path()
-        if pot:
-            base['extractor_args'] = {'youtubepot-bgutilscript': {'script_path': [pot]}}
-        account = load_account(req.get('auth'))
-        # Cookie strategies, least intrusive first: the account's own cookies
-        # (saved at sign-in) need no open browser; a live browser is the fallback
-        # for when those have rotated; anonymous is the last resort.
+        account = refresh_account(req)
+        # Cookie sources: live browser cookies first (always current), then the
+        # saved snapshot (which refresh_account keeps fresh). Anonymous playback is
+        # not offered — YouTube blocks it with bot checks and SABR-only formats.
         tempfiles = []
-        strategies = []
+        cookie_sources = []
+        browser = cookies_from_browser()
+        if browser:
+            cookie_sources.append({'cookiesfrombrowser': browser})
         if account:
             cookie = account_cookie(account)
             if cookie:
@@ -364,34 +578,51 @@ def run(req):
                 os.close(handle)
                 write_cookiefile(cookie, cf)
                 tempfiles.append(cf)
-                strategies.append({'cookiefile': cf})
-            browser = detect_cookies_browser()
-            if browser:
-                strategies.append({'cookiesfrombrowser': (browser, None, None, None)})
-        if not strategies:
-            strategies.append({})
+                cookie_sources.append({'cookiefile': cf})
+        if not cookie_sources:
+            raise SafeError('Sign in to YouTube Music to play songs. Open the '
+                            'Account tab and sign in once; Spun then keeps the '
+                            'session fresh from your browser.')
+        # Fast path first (one client, one PO token); escalate to the fallback
+        # clients only if the primary is challenged, so normal playback is quick.
+        attempts = [(PRIMARY_CLIENTS, src) for src in cookie_sources] + \
+                   [(FALLBACK_CLIENTS, src) for src in cookie_sources]
         info = None
         last_error = None
         try:
-            for extra in strategies:
-                opts = dict(base)
-                opts.update(extra)
-                try:
-                    with yt_dlp.YoutubeDL(opts) as dl:
-                        info = dl.extract_info(
-                            'https://music.youtube.com/watch?v=' + vid, download=False)
-                    if info:
-                        break
-                except Exception as exc:
-                    last_error = exc
-                    info = None
+            for attempt_pass in range(2):
+                for clients, extra in attempts:
+                    opts = dict(base)
+                    opts['extractor_args'] = playback_extractor_args(clients)
+                    opts.update(extra)
+                    try:
+                        with yt_dlp.YoutubeDL(opts) as dl:
+                            info = dl.extract_info(
+                                'https://music.youtube.com/watch?v=' + vid, download=False)
+                        if info:
+                            break
+                    except Exception as exc:
+                        last_error = exc
+                        info = None
+                if info:
+                    break
+                # A stale cached PO token can read as a bot check; drop it and let
+                # the second pass regenerate a fresh one before giving up.
+                low = str(last_error or '').lower()
+                if attempt_pass == 0 and ('not a bot' in low or 'confirm you' in low
+                                          or 'sign in to confirm' in low):
+                    invalidate_pot()
+                    continue
+                break
             if info is None:
                 low = str(last_error or '').lower()
                 if 'not a bot' in low or 'confirm you' in low or 'sign in to confirm' in low:
-                    raise SafeError('YouTube is blocking playback. Your saved '
-                                    'sign-in may have expired — sign in again on '
-                                    'the Account tab with fresh headers. (Opening '
-                                    'your signed-in browser also works.)')
+                    raise SafeError('YouTube flagged this playback as automated. '
+                                    'This usually clears on its own — try again in '
+                                    'a moment. It happens more when YouTube Music '
+                                    'is open in the same browser Spun reads cookies '
+                                    'from; a separate browser profile signed in just '
+                                    'for Spun (and left alone) avoids it.')
                 if 'country' in low or 'not available in your' in low or 'geo' in low:
                     raise SafeError('This song is not available in your country.')
                 if 'private' in low or 'members-only' in low or 'premium' in low or 'purchase' in low:
@@ -414,30 +645,33 @@ def run(req):
             raise RuntimeError('Could not resolve a playable stream for this song.')
         return {'url': url, 'seconds': info.get('duration', 0)}
     from ytmusicapi import YTMusic
-    account = load_account(req.get('auth'))
-    if account:
-        api = YTMusic(auth=account['auth'])
-    else:
-        api = YTMusic(requests_session=True)
+    account = refresh_account(req)
+    if not account:
+        # Anonymous YouTube is not offered: browsing needs a signed-in session
+        # and anonymous playback is blocked anyway. One sign-in is enough — the
+        # cookies are kept fresh from the browser afterwards.
+        raise SafeError('Sign in to YouTube Music on the Account tab first. '
+                        'Spun keeps your session fresh from your browser, so '
+                        'you only sign in once.')
+    api = YTMusic(auth=account['auth'])
     api._session.request = _bounded(api._session.request)
-    if account:
-        # A rejected browser session (expired or incomplete cookies) shows up as
-        # 401/403 or a generic 400; turn it into a re-sign-in hint.
-        inner = api._send_request
-        def guarded(*call_args, **call_kwargs):
-            try:
-                return inner(*call_args, **call_kwargs)
-            except Exception as exc:
-                text = str(exc)
-                if any(m in text for m in ('400', '401', '403',
-                                           'INVALID_ARGUMENT', 'UNAUTHENTICATED',
-                                           'PERMISSION_DENIED')):
-                    raise SafeError(
-                        'Your YouTube Music sign-in was rejected, most likely '
-                        'because the copied session expired. Sign in again with '
-                        'fresh request headers from music.youtube.com.')
-                raise
-        api._send_request = guarded
+    # A rejected browser session (expired or incomplete cookies) shows up as
+    # 401/403 or a generic 400; turn it into a re-sign-in hint.
+    inner = api._send_request
+    def guarded(*call_args, **call_kwargs):
+        try:
+            return inner(*call_args, **call_kwargs)
+        except Exception as exc:
+            text = str(exc)
+            if any(m in text for m in ('400', '401', '403',
+                                       'INVALID_ARGUMENT', 'UNAUTHENTICATED',
+                                       'PERMISSION_DENIED')):
+                raise SafeError(
+                    'Your YouTube Music sign-in was rejected, most likely '
+                    'because the copied session expired. Sign in again with '
+                    'fresh request headers from music.youtube.com.')
+            raise
+    api._send_request = guarded
     if op == 'account':
         if not account:
             raise RuntimeError('Sign in to view your account.')

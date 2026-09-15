@@ -11,6 +11,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
+#include <QProcessEnvironment>
 #include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
@@ -256,6 +257,27 @@ void Youtube::request(const QString &channel, const QVariantMap &args,
   QString helper = qEnvironmentVariable("SPUN_YOUTUBE_HELPER",
                                         QStringLiteral(SPUN_SOURCE_DIR) +
                                             "/helper/youtube.py");
+  // Inside the AppImage, AppRun prepends $APPDIR/usr/lib to LD_LIBRARY_PATH for
+  // the bundled Qt. The standalone Python helper does not need those libraries,
+  // and picking up the bundle's libcrypto there breaks browser-cookie
+  // decryption (the encrypted YouTube cookies silently drop, so the session
+  // reads as signed out). Drop the AppImage's own lib paths for the helper.
+  auto processEnv = QProcessEnvironment::systemEnvironment();
+  const QString appDir = processEnv.value(QStringLiteral("APPDIR"));
+  if (!appDir.isEmpty()) {
+    const QString ldPath = processEnv.value(QStringLiteral("LD_LIBRARY_PATH"));
+    if (!ldPath.isEmpty()) {
+      QStringList kept;
+      for (const QString &entry : ldPath.split(':', Qt::SkipEmptyParts))
+        if (!entry.startsWith(appDir))
+          kept.append(entry);
+      if (kept.isEmpty())
+        processEnv.remove(QStringLiteral("LD_LIBRARY_PATH"));
+      else
+        processEnv.insert(QStringLiteral("LD_LIBRARY_PATH"), kept.join(':'));
+    }
+  }
+  p->setProcessEnvironment(processEnv);
   p->start(python, {helper});
   p->write(QJsonDocument::fromVariant(args).toJson(QJsonDocument::Compact));
   p->closeWriteChannel();
