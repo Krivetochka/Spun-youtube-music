@@ -116,6 +116,8 @@ void Player::ensureMedia() {
     connect(m_media.get(), &QMediaPlayer::positionChanged, this, &Player::positionChanged);
     connect(m_media.get(), &QMediaPlayer::durationChanged, this, &Player::durationChanged);
     connect(m_audio.get(), &QAudioOutput::volumeChanged, this, &Player::volumeChanged);
+    // QAudioOutput samples the default device once, so follow later changes to it.
+    connect(&m_mediaDevices, &QMediaDevices::audioOutputsChanged, this, &Player::syncAudioDevice);
     connect(m_media.get(), &QMediaPlayer::errorOccurred, this, [this](auto, const QString &message) {
         m_restorePosition = -1;
         fail("Could not play this track. " + message);
@@ -591,6 +593,13 @@ QString Player::albumKey() const {
 }
 
 void Player::attachMixer(Tx6 *mixer) { m_mixer=mixer;refreshMixerRoute(); }
+// Moving to the new default must not disturb transport, level or the mixer's mute.
+void Player::syncAudioDevice() {
+    if (!m_audio) return;
+    const auto preferred = QMediaDevices::defaultAudioOutput();
+    if (preferred.isNull() || m_audio->device() == preferred) return;
+    m_audio->setDevice(preferred);
+}
 void Player::refreshMixerRoute() {
     if(!m_media)return;
     const bool active=m_mixer&&m_mixer->active();

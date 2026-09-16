@@ -8,6 +8,7 @@
 #include <QQuickItem>
 #include <QQuickItemGrabResult>
 #include <QTest>
+#include <QMediaDevices>
 #include <QElapsedTimer>
 #include <QDir>
 #include <QFile>
@@ -141,6 +142,30 @@ int exerciseMediaUi(Player &player, QQuickWindow *window, const QString &temp, c
     }
     }
 
+    // Playback follows the system default output when that default changes.
+    {
+    player.play();
+    // The output is built on a worker, so wait for it rather than assume it exists.
+    const bool ready=wait([&]{return !player.audioDevice().isNull();});
+    if(!ready)std::cout<<"SKIP audio output checks: no output device on this host"<<std::endl;
+    else{
+        check(player.audioDevice()==QMediaDevices::defaultAudioOutput(),"output opens on the current default device");
+        auto *devices=player.findChild<QMediaDevices*>();
+        check(devices!=nullptr,"player watches the system for output device changes");
+        if(devices){
+            // Let the transport settle before asserting the change is transparent.
+            check(wait([&]{return player.playing();}),"playback runs before the output device changes");
+            QTest::qWait(200);
+            const double levelBefore=player.volume();
+            QMetaObject::invokeMethod(devices,"audioOutputsChanged");
+            QTest::qWait(200);
+            check(player.audioDevice()==QMediaDevices::defaultAudioOutput(),"a device change re-points output at the new default");
+            check(qFuzzyCompare(player.volume()+1.,levelBefore+1.),"following the default preserves the level");
+            check(player.playing(),"following the default keeps playback running");
+        }
+    }
+    player.pause();QTest::qWait(60);
+    }
     // Check actual reverse pixels: valid theme properties alone missed a
     // hardcoded silver backing behind light ink in the CD/cassette booklets.
     {
