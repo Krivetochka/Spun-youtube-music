@@ -158,18 +158,21 @@ history can be cleared from its menu. All four 2D/3D players, Mini, media keys,
 seeking, lyrics (when available) and the TX-6 audio route use the same native
 transport. Starting a song does not change the Local or Cider queue.
 
-YouTube support is optional. Install Python 3 with venv/pip support and Node.js,
-then run this from the source checkout:
+YouTube support is optional and installs itself from the app. Open the YouTube
+panel and choose **Set up YouTube support**; it reports progress and says what
+is missing if Python 3 (with venv/pip) or Node.js is not present. The same setup
+can still be run from a terminal:
 
 ```sh
 ./scripts/setup-youtube.sh
 ```
 
-The helper runtime is isolated in `runtime/youtube`; it adds no browser engine
-and starts no background server. Local and Cider playback do not need it. After
-setup, use **Retry** if the YouTube panel was already open. The Nix package does
-not currently bundle the optional Python runtime; use the environment overrides
-below with a separately managed runtime.
+A Python interpreter that already carries `ytmusicapi` and `yt-dlp` is used as
+is, with no download. Otherwise the helper runtime is isolated in
+`runtime/youtube`; it adds no browser engine and starts no background server.
+Local and Cider playback do not need it. The Nix package does not currently
+bundle the optional Python runtime; use the environment overrides below with a
+separately managed runtime.
 
 Audio is temporarily buffered before playback, with a 64 MiB limit per song and
 at most one next-song buffer. Buffers are removed when replaced or on normal exit;

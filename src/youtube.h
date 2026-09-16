@@ -17,6 +17,9 @@ class Youtube : public QObject {
   Q_PROPERTY(bool ready READ ready NOTIFY changed)
   Q_PROPERTY(bool busy READ busy NOTIFY changed)
   Q_PROPERTY(QString error READ error NOTIFY changed)
+  Q_PROPERTY(bool installing READ installing NOTIFY changed)
+  Q_PROPERTY(bool installable READ installable NOTIFY changed)
+  Q_PROPERTY(QString installStatus READ installStatus NOTIFY changed)
   Q_PROPERTY(QString heading READ heading NOTIFY changed)
   Q_PROPERTY(QString page READ page NOTIFY changed)
   Q_PROPERTY(QVariantList items READ items NOTIFY changed)
@@ -38,6 +41,10 @@ public:
   bool ready() const { return m_ready; }
   bool busy() const { return m_busy; }
   QString error() const { return m_error; }
+  bool installing() const { return m_installing; }
+  // Setup is only offered when this build can run it from a source checkout.
+  bool installable() const;
+  QString installStatus() const { return m_installStatus; }
   QString heading() const { return m_heading; }
   QString page() const { return m_page; }
   QVariantList items() const { return m_items; }
@@ -45,6 +52,7 @@ public:
   QVariantMap current() const;
   bool canBack() const { return !m_back.isEmpty(); }
   Q_INVOKABLE void check();
+  Q_INVOKABLE void install();
   Q_INVOKABLE void search(const QString &query,
                           const QString &filter = "songs");
   Q_INVOKABLE void show(const QString &page);
@@ -96,6 +104,11 @@ private:
   QList<Track> tracks(const QVariantList &items);
   QVariantList queueItems() const;
   void fail(const QString &message);
+  // The helper runs on the bundled runtime when present, otherwise on a
+  // system interpreter that already carries the packages.
+  static QString helperPython();
+  static QString setupScript();
+  void finishInstall(bool ok, const QString &message);
   Player m_player;
   QString m_directory, m_path, m_heading = "YouTube Music", m_page = "search",
                                m_error;
@@ -104,6 +117,9 @@ private:
   QVariantList m_items, m_favorites, m_history, m_playlists, m_back;
   QHash<QString, QVariantMap> m_catalog;
   QHash<QString, QPointer<QProcess>> m_jobs;
+  QPointer<QProcess> m_install;
+  bool m_installing = false;
+  QString m_installStatus;
   QNetworkAccessManager m_network;
   QPointer<QNetworkReply> m_artReply;
   std::shared_ptr<QTemporaryDir> m_audio, m_prepared;

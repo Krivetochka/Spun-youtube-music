@@ -8,6 +8,8 @@ Rectangle {
     color: app.surface
     radius: SpunStyle.panelRadius
     readonly property bool playlistPage: youtube.page.startsWith("playlist:")
+    // Offer setup only while the runtime is genuinely missing and installable.
+    readonly property bool setupOffered: !youtube.ready && youtube.installable && (youtube.installing || youtube.error.length>0)
     property var selected: ({})
     property int selectedIndex: -1
     property string renameId: ""
@@ -133,7 +135,10 @@ Rectangle {
         x: 24; y: 230; width: parent.width-48; spacing: 16
         visible: !youtube.busy && (youtube.error.length>0 || youtube.items.length===0)
         SpunText {width:parent.width;text:youtube.error || (youtube.page==="search"?"Find a song, album, artist or playlist. No account needed.":"Nothing here yet.");wrapMode:Text.WordWrap;color:youtube.error.length?theme.colors.error:panel.app.mutedInk;font.pixelSize:SpunStyle.body}
-        SpunButton {objectName:"youtubeRetry";text:"Retry";visible:youtube.error.length>0;onClicked:{if(!youtube.ready)youtube.check();else if(search.text.trim().length)youtube.search(search.text,panel.searchFilter);else youtube.show("home")}}
+        // Setup runs from here so a first run never needs a terminal.
+        SpunText {objectName:"youtubeSetupNote";width:parent.width;visible:panel.setupOffered;text:youtube.installing?(youtube.installStatus||"Setting up YouTube support..."):"This downloads a small Python helper. No account is needed.";wrapMode:Text.WordWrap;color:panel.app.mutedInk;font.pixelSize:SpunStyle.caption}
+        SpunButton {objectName:"youtubeSetup";text:youtube.installing?"Setting up...":"Set up YouTube support";tonal:true;visible:panel.setupOffered;enabled:!youtube.installing;onClicked:youtube.install()}
+        SpunButton {objectName:"youtubeRetry";text:"Retry";visible:youtube.error.length>0 && !youtube.installing;onClicked:{if(!youtube.ready)youtube.check();else if(search.text.trim().length)youtube.search(search.text,panel.searchFilter);else youtube.show("home")}}
         SpunButton {objectName:"youtubeDiscover";text:"Discover music";visible:!youtube.error.length && youtube.page==="search";onClicked:youtube.show("home")}
     }
 

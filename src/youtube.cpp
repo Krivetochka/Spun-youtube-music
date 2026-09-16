@@ -155,6 +155,12 @@ Youtube::~Youtube() {
   persist();
   for (const auto &key : m_jobs.keys())
     cancel(key);
+  // A half-finished setup must not outlive the app.
+  if (m_install) {
+    m_install->disconnect(this);
+    m_install->kill();
+    m_install->waitForFinished(2000);
+  }
   m_player.stop();
 }
 void Youtube::fail(const QString &message) {
@@ -212,8 +218,7 @@ void Youtube::request(const QString &channel, const QVariantMap &args,
               return;
             m_jobs.remove(channel);
             done({{"ok", false},
-                  {"error", "YouTube support is not installed. Run "
-                            "scripts/setup-youtube.sh in the Spun folder."}});
+                  {"error", "YouTube support is not installed yet."}});
             p->deleteLater();
           });
   connect(p, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
@@ -231,9 +236,7 @@ void Youtube::request(const QString &channel, const QVariantMap &args,
             p->deleteLater();
             done(data);
           });
-  QString python = qEnvironmentVariable("SPUN_YOUTUBE_PYTHON");
-  if (python.isEmpty())
-    python = QStringLiteral(SPUN_SOURCE_DIR) + "/runtime/youtube/bin/python";
+  const QString python = helperPython();
   QString helper = qEnvironmentVariable("SPUN_YOUTUBE_HELPER",
                                         QStringLiteral(SPUN_SOURCE_DIR) +
                                             "/helper/youtube.py");
@@ -259,6 +262,93 @@ void Youtube::setEnabled(bool enabled) {
   }
   emit changed();
 }
+QString Youtube::helperPython() {
+  const auto configured = qEnvironmentVariable("SPUN_YOUTUBE_PYTHON");
+  if (!configured.isEmpty())
+    return configured;
+  const auto bundled =
+      QStringLiteral(SPUN_SOURCE_DIR) + "/runtime/youtube/bin/python";
+  if (QFileInfo::exists(bundled))
+    return bundled;
+  // A system interpreter may already carry the packages; check() decides.
+  const auto system = QStandardPaths::findExecutable("python3");
+  return system.isEmpty() ? bundled : system;
+}
+QString Youtube::setupScript() {
+  return QStringLiteral(SPUN_SOURCE_DIR) + "/scripts/setup-youtube.sh";
+}
+bool Youtube::installable() const {
+  return qEnvironmentVariable("SPUN_YOUTUBE_PYTHON").isEmpty() &&
+         QFileInfo::exists(setupScript());
+}
+void Youtube::finishInstall(bool ok, const QString &message) {
+  m_installing = false;
+  m_installStatus.clear();
+  if (ok) {
+    m_checked = false;
+    check();
+    return;
+  }
+  m_error = message;
+  emit changed();
+  emit feedback(message, true);
+}
+// Setup is offered in the panel so a first run never needs a terminal.
+void Youtube::install() {
+  if (m_installing || m_install)
+    return;
+  if (!installable()) {
+    finishInstall(false, "YouTube support cannot be set up from this build.");
+    return;
+  }
+  if (QStandardPaths::findExecutable("node").isEmpty()) {
+    finishInstall(false, "Install Node.js, then set up YouTube support again.");
+    return;
+  }
+  if (QStandardPaths::findExecutable("python3").isEmpty()) {
+    finishInstall(false, "Install Python 3, then set up YouTube support again.");
+    return;
+  }
+  m_installing = true;
+  m_error.clear();
+  m_installStatus = "Preparing YouTube support...";
+  emit changed();
+  auto *p = new QProcess(this);
+  m_install = p;
+  p->setProcessChannelMode(QProcess::MergedChannels);
+  auto tail = std::make_shared<QString>();
+  connect(p, &QProcess::readyRead, this, [this, p, tail] {
+    const auto chunk = QString::fromUtf8(p->readAll());
+    for (const auto &line : chunk.split('\n', Qt::SkipEmptyParts))
+      *tail = line.trimmed();
+    if (tail->size() > 200)
+      *tail = tail->left(200);
+    // Surface progress without echoing pip's full transcript into the panel.
+    m_installStatus = tail->isEmpty() ? m_installStatus : *tail;
+    emit changed();
+  });
+  connect(p, &QProcess::errorOccurred, this, [this, p](QProcess::ProcessError) {
+    if (m_install != p)
+      return;
+    m_install.clear();
+    p->deleteLater();
+    finishInstall(false, "Could not start the YouTube setup script.");
+  });
+  connect(p, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+          [this, p, tail](int code, QProcess::ExitStatus status) {
+            if (m_install != p)
+              return;
+            m_install.clear();
+            p->deleteLater();
+            const bool ok = status == QProcess::NormalExit && code == 0;
+            finishInstall(ok, ok ? QString()
+                                 : tail->isEmpty()
+                                       ? "YouTube setup failed. Check your "
+                                         "connection and try again."
+                                       : "YouTube setup failed: " + *tail);
+          });
+  p->start("/usr/bin/env", {"bash", setupScript()});
+}
 void Youtube::check() {
   m_checked = true;
   m_busy = true;
@@ -266,10 +356,12 @@ void Youtube::check() {
   request("browse", {{"op", "check"}}, [this](const auto &r) {
     m_busy = false;
     m_ready = r.value("ok").toBool();
-    m_error = m_ready
-                  ? QString()
-                  : "YouTube support needs setup. Run scripts/setup-youtube.sh "
-                    "in the Spun folder, then Retry.";
+    m_error = m_ready ? QString()
+                      : installable()
+                          ? "YouTube support is not installed yet."
+                          : "YouTube support is not installed. Point "
+                            "SPUN_YOUTUBE_PYTHON at a runtime that has "
+                            "ytmusicapi and yt-dlp.";
     emit changed();
   });
 }
