@@ -108,6 +108,39 @@ int exerciseMediaUi(Player &player, QQuickWindow *window, const QString &temp, c
     }
     check(!window->property("immersive").toBool() && !window->property("sideOpen").toBool(), "repeated immersion toggles leave panels closed");
     check(player.trackKey() == immersionTrack && player.count() == immersionCount && !player.playing(), "immersion toggles preserve the paused song and queue");
+
+    // A pointer click leaves the control focused. Space must still reach the global
+    // transport shortcut instead of repeating whatever was clicked last.
+    {
+    window->setProperty("libraryOpen",false);window->setProperty("queueOpen",false);
+    player.setVinylAlbumMode(false);player.setShuffle(false);QTest::qWait(60);
+    auto *shuffle=item("shuffleButton");
+    if(!shuffle)check(false,"shuffle control is reachable for the pointer focus check");
+    else{
+        const auto hit=shuffle->mapToScene(QPointF(shuffle->width()/2,shuffle->height()/2)).toPoint();
+        QTest::mouseClick(window,Qt::LeftButton,Qt::NoModifier,hit);
+        check(wait([&]{return player.shuffle();}),"clicking a control activates it once");
+        check(window->activeFocusItem()==shuffle,"a pointer click leaves the clicked control focused");
+        check(!shuffle->property("visualFocus").toBool(),"a pointer click does not raise visual focus");
+        const bool playingBefore=player.playing();
+        QTest::keyClick(window,Qt::Key_Space);
+        check(wait([&]{return player.playing()!=playingBefore;}),"Space toggles playback after a control was clicked");
+        check(player.shuffle(),"Space does not repeat the last clicked control");
+        player.pause();QTest::qWait(60);
+        // Keyboard focus keeps the standard behaviour: Space activates the focused control.
+        // Focus must drop first, or the control keeps the pointer's focus reason.
+        shuffle->setFocus(false);QTest::qWait(60);
+        shuffle->forceActiveFocus(Qt::TabFocusReason);QTest::qWait(60);
+        check(shuffle->property("visualFocus").toBool(),"keyboard focus raises visual focus");
+        const bool playingBeforeKey=player.playing();
+        QTest::keyClick(window,Qt::Key_Space);QTest::qWait(150);
+        check(!player.shuffle(),"Space activates a keyboard-focused control");
+        check(player.playing()==playingBeforeKey,"Space leaves transport alone for a keyboard-focused control");
+        player.setShuffle(false);
+        window->contentItem()->forceActiveFocus(Qt::MouseFocusReason);QTest::qWait(60);
+    }
+    }
+
     // Check actual reverse pixels: valid theme properties alone missed a
     // hardcoded silver backing behind light ink in the CD/cassette booklets.
     {
