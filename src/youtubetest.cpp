@@ -40,6 +40,30 @@ int exerciseYoutube(Player &local, Youtube &yt, QQuickWindow *window,
     std::cout << (ok ? "PASS " : "FAIL ") << label << std::endl;
     return ok;
   };
+  // A first run must offer setup in the panel rather than name a shell script.
+  {
+    qunsetenv("SPUN_YOUTUBE_PYTHON");
+    Youtube fresh(temp + "/youtube-setup");
+    check(fresh.installable(),
+          "a source checkout can set YouTube support up in the app");
+    fresh.check();
+    check(until([&] { return !fresh.busy(); }, 30000),
+          "a missing runtime resolves instead of hanging");
+    if (fresh.ready())
+      // A system interpreter already carrying the packages needs no setup.
+      check(fresh.error().isEmpty(), "an existing system runtime is used as is");
+    else
+      check(!fresh.error().isEmpty() &&
+                !fresh.error().contains("setup-youtube.sh"),
+            "setup guidance does not send the user to a terminal");
+    // Without Node.js the script cannot succeed, so say so before running it.
+    const auto path = qgetenv("PATH");
+    qputenv("PATH", "/nonexistent");
+    fresh.install();
+    check(!fresh.installing() && fresh.error().contains("Node.js"),
+          "missing Node.js is reported instead of a failed script");
+    qputenv("PATH", path);
+  }
   qputenv("SPUN_YOUTUBE_PYTHON", "/usr/bin/python3");
   qputenv("SPUN_YOUTUBE_HELPER", SPUN_SOURCE_DIR "/tests/youtube_fixture.py");
   qputenv("SPUN_YOUTUBE_FIXTURE_AUDIO", SPUN_DEMO_FILE);

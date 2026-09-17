@@ -3,6 +3,8 @@
 #include <QImage>
 #include <QMediaPlayer>
 #include <QAudioOutput>
+#include <QAudioDevice>
+#include <QMediaDevices>
 #include <QSettings>
 #include <QUrl>
 #include <QVariantList>
@@ -144,6 +146,9 @@ public:
     QString trackId() const;
     void setVolume(double value);
     void attachMixer(Tx6 *mixer);
+    // Qt binds an output device at construction; the system default can change later.
+    void syncAudioDevice();
+    QAudioDevice audioDevice() const { return m_audio ? m_audio->device() : QAudioDevice{}; }
     void refreshMixerRoute();
     void setShuffle(bool value);
     void setRepeatMode(int value);
@@ -210,6 +215,7 @@ private:
     bool m_preparingAudio = false, m_playPending = false;
     double m_volume = .65;
     Tx6 *m_mixer=nullptr;
+    QMediaDevices m_mediaDevices{this};
     std::unique_ptr<QAudioOutput> m_audio;
     std::unique_ptr<QMediaPlayer> m_media;
     std::unique_ptr<QAudioBufferOutput> m_mixOutput;
