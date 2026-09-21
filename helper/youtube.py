@@ -412,6 +412,20 @@ def artwork(item):
     return src
 
 
+def play_count(views):
+    """Normalize ytmusicapi's play-count string to just the count, or ''.
+
+    Search gives "295M", album tracks give "54M plays"; drop the trailing word so
+    the UI can render it uniformly. Only short abbreviated counts are kept."""
+    text = (views or '').strip()
+    low = text.lower()
+    if low.endswith(' plays'):
+        text = text[:-6].strip()
+    elif low.endswith(' play'):
+        text = text[:-5].strip()
+    return text if 0 < len(text) <= 16 else ''
+
+
 def normalize(item, kind='', parent=None):
     parent = parent or {}
     video = item.get('videoId') or ''
@@ -437,7 +451,10 @@ def normalize(item, kind='', parent=None):
             'art': artwork(item) or artwork(parent), 'duration': item.get('duration') or item.get('length') or '',
             'seconds': item.get('duration_seconds') or 0,
             'discNumber': item.get('discNumber') or item.get('disc_number') or 1,
-            'explicit': bool(item.get('isExplicit')), 'available': item.get('isAvailable', True)}
+            'explicit': bool(item.get('isExplicit')), 'available': item.get('isAvailable', True),
+            # Play count, where YouTube Music provides it (search results and album
+            # tracks). ytmusicapi returns "295M" or "54M plays"; keep just the count.
+            'plays': play_count(item.get('views'))}
 
 
 def clean(items, kind='', parent=None):

@@ -138,7 +138,7 @@ Rectangle {
                 Rectangle {anchors.fill:parent;visible:parent.status!==Image.Ready;color:panel.app.inset;radius:6;Glyph {anchors.centerIn:parent;name: "disc";ink:panel.app.mutedInk;width:24;height:24}}
             }
             SpunText {x:62;y:12;width:parent.width-108;text:row.modelData.title;color:panel.app.ink;font.pixelSize:SpunStyle.body;elide:Text.ElideRight}
-            SpunText {x:62;y:37;width:parent.width-108;text:row.modelData.artist || row.modelData.kind;color:panel.app.mutedInk;font.pixelSize:SpunStyle.caption;elide:Text.ElideRight}
+            SpunText {x:62;y:37;width:parent.width-108;text:(row.modelData.artist||row.modelData.kind||"")+(row.modelData.plays?((row.modelData.artist||row.modelData.kind)?" • ":"")+row.modelData.plays+" plays":"");color:panel.app.mutedInk;font.pixelSize:SpunStyle.caption;elide:Text.ElideRight}
             IconButton {id:rowMenu;objectName:"youtubeRowMenu_"+row.index;x:parent.width-44;y:12;glyphName:"more";tip:"Song actions";ink:panel.app.mutedInk;onClicked:panel.menuFor(row.modelData,row.index,rowMenu)}
         }
     }

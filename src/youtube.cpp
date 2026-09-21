@@ -64,7 +64,8 @@ QVariantMap Youtube::cleanItem(const QVariantMap &row) {
       {"album", row.value("album").toString().left(512)},
       {"albumId", row.value("albumId").toString().left(256)},
       {"artistId", row.value("artistId").toString().left(256)},
-      {"available", row.value("available", true).toBool()}};
+      {"available", row.value("available", true).toBool()},
+      {"plays", row.value("plays").toString().left(16)}};
   if (artUrl(QUrl(row.value("art").toString())))
     result["art"] = row.value("art").toString().left(2048);
   qint64 seconds = row.value("seconds").toLongLong();
