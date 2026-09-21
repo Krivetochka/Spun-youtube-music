@@ -461,6 +461,62 @@ def clean(items, kind='', parent=None):
     return [t for i in items if isinstance(i, dict) and (t := normalize(i, kind, parent))['id']]
 
 
+def parse_lrc(text):
+    """Parse LRC ("[mm:ss.xx] words") into timed lines [{start, end, text}]."""
+    stamp = re.compile(r'\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]')
+    lines = []
+    for raw in (text or '').splitlines():
+        stamps = stamp.findall(raw)
+        if not stamps:
+            continue
+        words = stamp.sub('', raw).strip()
+        for minutes, seconds, frac in stamps:
+            start = (int(minutes) * 60 + int(seconds)) * 1000
+            if frac:
+                start += int((frac + '000')[:3])
+            lines.append({'start': start, 'end': 0, 'text': words})
+    lines.sort(key=lambda line: line['start'])
+    for i in range(len(lines) - 1):
+        lines[i]['end'] = lines[i + 1]['start']
+    # Drop gap markers (blank text); the previous line already got its end time.
+    return [line for line in lines if line['text']]
+
+
+def fetch_synced_lyrics(title, artist, album, seconds):
+    """Time-synced lyrics from LRCLIB (open, no auth), or None.
+
+    Returns the same {'lyrics', 'lines'} shape as normalize_lyrics, with
+    timestamped lines so the UI can scroll along with playback."""
+    import urllib.request
+    import urllib.parse
+    if not title:
+        return None
+    query = {'track_name': title}
+    if artist:
+        query['artist_name'] = artist
+    url = 'https://lrclib.net/api/search?' + urllib.parse.urlencode(query)
+    request = urllib.request.Request(
+        url, headers={'User-Agent':
+                      'Spun (github.com/Krivetochka/Spun-youtube-music)'})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            results = json.load(response)
+    except Exception:
+        return None
+    synced = [r for r in results if isinstance(r, dict) and r.get('syncedLyrics')]
+    if not synced:
+        return None
+    best = None
+    if seconds and seconds > 0:
+        best = min(synced, key=lambda r: abs((r.get('duration') or 0) - seconds))
+        if abs((best.get('duration') or 0) - seconds) > 8:
+            best = None  # no close-enough duration match; take the top result
+    lines = parse_lrc((best or synced[0]).get('syncedLyrics') or '')
+    if not lines:
+        return None
+    return {'lyrics': '\n'.join(line['text'] for line in lines), 'lines': lines}
+
+
 def normalize_lyrics(data):
     from dataclasses import asdict, is_dataclass
     if is_dataclass(data): data=asdict(data)
@@ -757,10 +813,28 @@ def run(req):
         return {'items': clean(data.get('tracks', []), 'song')}
     if op == 'lyrics':
         data = api.get_watch_playlist(videoId=req['id'], limit=1)
-        if not data.get('lyrics'): return {'lyrics': '', 'lines': []}
-        try: result = api.get_lyrics(data['lyrics'], timestamps=True)
-        except Exception: result = api.get_lyrics(data['lyrics'])
-        return normalize_lyrics(result)
+        track = (data.get('tracks') or [{}])[0]
+        title = track.get('title', '')
+        artist = ', '.join(a.get('name', '') for a in (track.get('artists') or [])
+                           if isinstance(a, dict))
+        album = track.get('album') or {}
+        album = album.get('name', '') if isinstance(album, dict) else ''
+        seconds = 0
+        for part in str(track.get('length') or '').split(':'):
+            if part.isdigit():
+                seconds = seconds * 60 + int(part)
+        # Prefer time-synced lyrics (LRCLIB) so the view scrolls with playback;
+        # YouTube's own timed lyrics need a mobile client it rejects our cookies
+        # for, so fall back to its plain lyrics only.
+        synced = fetch_synced_lyrics(title, artist, album, seconds)
+        if synced:
+            return synced
+        if not data.get('lyrics'):
+            return {'lyrics': '', 'lines': []}
+        try:
+            return normalize_lyrics(api.get_lyrics(data['lyrics']))
+        except Exception:
+            return {'lyrics': '', 'lines': []}
     if op == 'link':
         parsed = urlparse(req['url'])
         if parsed.hostname not in ('youtube.com','www.youtube.com','music.youtube.com','m.youtube.com','youtu.be'):
