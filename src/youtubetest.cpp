@@ -66,6 +66,8 @@ int exerciseYoutube(Player &local, Youtube &yt, QQuickWindow *window,
   }
   qputenv("SPUN_YOUTUBE_PYTHON", "/usr/bin/python3");
   qputenv("SPUN_YOUTUBE_HELPER", SPUN_SOURCE_DIR "/tests/youtube_fixture.py");
+  // The fixture never needs PO tokens; keep the test free of a node process.
+  qputenv("SPUN_YOUTUBE_POT_SERVER", "0");
   qputenv("SPUN_YOUTUBE_FIXTURE_AUDIO", SPUN_DEMO_FILE);
   auto *p = yt.transport();
   p->setVolume(0);

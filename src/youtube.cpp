@@ -16,8 +16,10 @@
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QStandardPaths>
+#include <QTcpServer>
 #include <QUuid>
 #include <signal.h>
+#include <sys/prctl.h>
 #include <unistd.h>
 
 static QString keyFor(const QString &id) {
@@ -177,6 +179,7 @@ Youtube::~Youtube() {
     m_install->kill();
     m_install->waitForFinished(2000);
   }
+  stopPotServer();
   m_player.stop();
 }
 void Youtube::fail(const QString &message) {
@@ -261,26 +264,13 @@ void Youtube::request(const QString &channel, const QVariantMap &args,
   QString helper = qEnvironmentVariable("SPUN_YOUTUBE_HELPER",
                                         QStringLiteral(SPUN_SOURCE_DIR) +
                                             "/helper/youtube.py");
-  // Inside the AppImage, AppRun prepends $APPDIR/usr/lib to LD_LIBRARY_PATH for
-  // the bundled Qt. The standalone Python helper does not need those libraries,
-  // and picking up the bundle's libcrypto there breaks browser-cookie
-  // decryption (the encrypted YouTube cookies silently drop, so the session
-  // reads as signed out). Drop the AppImage's own lib paths for the helper.
-  auto processEnv = QProcessEnvironment::systemEnvironment();
-  const QString appDir = processEnv.value(QStringLiteral("APPDIR"));
-  if (!appDir.isEmpty()) {
-    const QString ldPath = processEnv.value(QStringLiteral("LD_LIBRARY_PATH"));
-    if (!ldPath.isEmpty()) {
-      QStringList kept;
-      for (const QString &entry : ldPath.split(':', Qt::SkipEmptyParts))
-        if (!entry.startsWith(appDir))
-          kept.append(entry);
-      if (kept.isEmpty())
-        processEnv.remove(QStringLiteral("LD_LIBRARY_PATH"));
-      else
-        processEnv.insert(QStringLiteral("LD_LIBRARY_PATH"), kept.join(':'));
-    }
-  }
+  auto processEnv = helperEnvironment();
+  // Point the helper at the running PO-token server; without it the helper
+  // falls back to generating each token with the (slower) bgutil script.
+  if (m_potPort && m_potServer &&
+      m_potServer->state() == QProcess::Running)
+    processEnv.insert(QStringLiteral("SPUN_YOUTUBE_POT_URL"),
+                      QStringLiteral("http://127.0.0.1:%1").arg(m_potPort));
   p->setProcessEnvironment(processEnv);
   p->start(python, {helper});
   p->write(QJsonDocument::fromVariant(args).toJson(QJsonDocument::Compact));
@@ -294,7 +284,9 @@ void Youtube::setEnabled(bool enabled) {
   if (!enabled) {
     m_player.pause();
     cancel("prepare");
+    stopPotServer();
   } else {
+    startPotServer();
     if (!m_checked)
       check();
     if (m_signedIn && m_account.isEmpty())
@@ -305,6 +297,105 @@ void Youtube::setEnabled(bool enabled) {
       loadArt();
   }
   emit changed();
+}
+QProcessEnvironment Youtube::helperEnvironment() {
+  // Inside the AppImage, AppRun prepends $APPDIR/usr/lib to LD_LIBRARY_PATH for
+  // the bundled Qt. The standalone Python helper does not need those libraries,
+  // and picking up the bundle's libcrypto there breaks browser-cookie
+  // decryption (the encrypted YouTube cookies silently drop, so the session
+  // reads as signed out). Drop the AppImage's own lib paths for these tools.
+  auto env = QProcessEnvironment::systemEnvironment();
+  const QString appDir = env.value(QStringLiteral("APPDIR"));
+  if (!appDir.isEmpty()) {
+    const QString ldPath = env.value(QStringLiteral("LD_LIBRARY_PATH"));
+    if (!ldPath.isEmpty()) {
+      QStringList kept;
+      for (const QString &entry : ldPath.split(':', Qt::SkipEmptyParts))
+        if (!entry.startsWith(appDir))
+          kept.append(entry);
+      if (kept.isEmpty())
+        env.remove(QStringLiteral("LD_LIBRARY_PATH"));
+      else
+        env.insert(QStringLiteral("LD_LIBRARY_PATH"), kept.join(':'));
+    }
+  }
+  // The local PO-token server must be reached directly, never via a proxy.
+  for (const auto name : {QStringLiteral("NO_PROXY"), QStringLiteral("no_proxy")}) {
+    auto hosts = env.value(name).split(',', Qt::SkipEmptyParts);
+    for (const auto host : {QStringLiteral("127.0.0.1"), QStringLiteral("localhost")})
+      if (!hosts.contains(host))
+        hosts.append(host);
+    env.insert(name, hosts.join(','));
+  }
+  return env;
+}
+QString Youtube::potServerScript() {
+  // SPUN_YOUTUBE_POT_SCRIPT points at build/generate_once.js; the server entry
+  // point is its neighbour.
+  const auto script = qEnvironmentVariable("SPUN_YOUTUBE_POT_SCRIPT");
+  const auto dir = script.isEmpty()
+                       ? QStringLiteral(SPUN_SOURCE_DIR) +
+                             "/runtime/bgutil/server/build"
+                       : QFileInfo(script).absolutePath();
+  const auto path = dir + "/main.js";
+  return QFileInfo::exists(path) ? path : QString();
+}
+void Youtube::startPotServer() {
+  if (m_potServer)
+    return;
+  const auto setting = qEnvironmentVariable("SPUN_YOUTUBE_POT_SERVER").toLower();
+  if (setting == "0" || setting == "off" || setting == "none")
+    return;
+  const auto script = potServerScript();
+  const auto node = QStandardPaths::findExecutable("node");
+  if (script.isEmpty() || node.isEmpty())
+    return;
+  // A free loopback port, so a separately run bgutil (default 4416) or a second
+  // Spun cannot collide with this one.
+  QTcpServer probe;
+  if (!probe.listen(QHostAddress::LocalHost, 0))
+    return;
+  m_potPort = probe.serverPort();
+  probe.close();
+  auto *p = new QProcess(this);
+  m_potServer = p;
+  // Its log is not ours to show; discard it so a full pipe can never stall it.
+  p->setProcessChannelMode(QProcess::MergedChannels);
+  p->setStandardOutputFile(QProcess::nullDevice());
+  // Die with Spun even if the app crashes, instead of lingering in the background.
+  p->setChildProcessModifier([] { ::prctl(PR_SET_PDEATHSIG, SIGTERM); });
+  p->setProcessEnvironment(helperEnvironment());
+  connect(p, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
+          [this, p](int, QProcess::ExitStatus) {
+            if (m_potServer == p) {
+              m_potServer.clear();
+              m_potPort = 0;
+            }
+            p->deleteLater();
+          });
+  connect(p, &QProcess::errorOccurred, this,
+          [this, p](QProcess::ProcessError error) {
+            if (error != QProcess::FailedToStart)
+              return;
+            if (m_potServer == p) {
+              m_potServer.clear();
+              m_potPort = 0;
+            }
+            p->deleteLater();
+          });
+  p->start(node, {script, "--port", QString::number(m_potPort)});
+}
+void Youtube::stopPotServer() {
+  if (!m_potServer)
+    return;
+  QProcess *p = m_potServer.data();
+  m_potServer.clear();
+  m_potPort = 0;
+  p->disconnect(this);
+  p->terminate();
+  if (!p->waitForFinished(1500))
+    p->kill();
+  p->deleteLater();
 }
 QString Youtube::helperPython() {
   const auto configured = qEnvironmentVariable("SPUN_YOUTUBE_PYTHON");

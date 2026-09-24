@@ -129,6 +129,15 @@ private:
   // The helper runs on the bundled runtime when present, otherwise on a
   // system interpreter that already carries the packages.
   static QString helperPython();
+  // Environment for the helper and the PO-token server (AppImage lib paths
+  // removed, loopback exempt from proxies).
+  static QProcessEnvironment helperEnvironment();
+  // A long-running bgutil server keeps its BotGuard minter warm, so each song's
+  // PO token is minted in well under a second instead of being built from
+  // scratch by the one-shot script.
+  static QString potServerScript();
+  void startPotServer();
+  void stopPotServer();
   static QString setupScript();
   void finishInstall(bool ok, const QString &message);
   Player m_player;
@@ -142,6 +151,8 @@ private:
   QHash<QString, QVariantMap> m_catalog;
   QHash<QString, QPointer<QProcess>> m_jobs;
   QPointer<QProcess> m_install;
+  QPointer<QProcess> m_potServer;
+  quint16 m_potPort = 0;
   bool m_installing = false;
   QString m_installStatus;
   QNetworkAccessManager m_network;

@@ -34,20 +34,20 @@ FALLBACK_CLIENTS = ['web_safari', 'mweb', 'tv']
 def playback_extractor_args(clients):
     """extractor_args for a stream/buffer request: the given clients + PO token.
 
-    Prefer a cached, still-valid PO token (fast: no per-song token generation);
-    fall back to the bgutil script provider, which yt-dlp invokes on demand."""
-    yt = {'player_client': list(clients)}
-    args = {'youtube': yt}
-    vd, tok = cached_pot()
-    if vd and tok:
-        yt['visitor_data'] = [vd]
-        # The gvs (streaming) token is bound to the visitor data, not the client,
-        # so the same token serves every web/mobile client we try.
-        yt['po_token'] = [f'{c}.gvs+{tok}' for c in clients]
-    else:
-        pot = pot_script_path()
-        if pot:
-            args['youtubepot-bgutilscript'] = {'script_path': [pot]}
+    The PO token always comes from yt-dlp's bgutil provider so that yt-dlp binds
+    it itself — YouTube now binds streaming tokens to each video. A token bound to
+    anything else still resolves a URL, but googlevideo then serves only the first
+    ~1 MB and answers 403 (seen in the player as "Could not open file")."""
+    args = {'youtube': {'player_client': list(clients)}}
+    # The app runs a bgutil server that keeps its BotGuard minter warm, so tokens
+    # are minted quickly; yt-dlp prefers it and falls back to the one-shot script
+    # when the server is not (yet) reachable.
+    server = os.environ.get('SPUN_YOUTUBE_POT_URL', '')
+    if server:
+        args['youtubepot-bgutilhttp'] = {'base_url': [server]}
+    pot = pot_script_path()
+    if pot:
+        args['youtubepot-bgutilscript'] = {'script_path': [pot]}
     return args
 
 
@@ -272,103 +272,18 @@ def pot_script_path():
     return path if path and os.path.isfile(path) else ''
 
 
-def pot_cache_path():
+def remove_stale_pot_cache():
+    """Delete the PO token earlier builds cached in the temp dir.
+
+    It was bound to one-off visitor data and reused for every song, but YouTube
+    now binds streaming tokens to each video, so that token let googlevideo send
+    only the first ~1 MB before answering 403 ("Could not open file")."""
     import tempfile
-    return os.path.join(tempfile.gettempdir(), 'spun-youtube-pot-%d.json' % os.getuid())
-
-
-def invalidate_pot():
-    """Drop the cached PO token (call after a bot-check so the next play regens)."""
     try:
-        os.unlink(pot_cache_path())
+        os.unlink(os.path.join(tempfile.gettempdir(),
+                               'spun-youtube-pot-%d.json' % os.getuid()))
     except OSError:
         pass
-
-
-def pot_is_cached(margin=600):
-    """True when a still-valid PO token is cached (a cheap read, never generates)."""
-    import time
-    import json as _json
-    try:
-        with open(pot_cache_path(), encoding='utf8') as file:
-            data = _json.load(file)
-        return bool(data.get('po_token')) and \
-            time.time() < float(data.get('expires_epoch', 0)) - margin
-    except (OSError, ValueError, TypeError):
-        return False
-
-
-def prewarm_pot():
-    """Generate the PO token in a detached process so it's cached before the first
-    song plays. No-op when one is already cached. Fire-and-forget."""
-    if pot_is_cached():
-        return
-    try:
-        import subprocess
-        import sys
-        proc = subprocess.Popen(
-            [sys.executable, os.path.abspath(__file__)],
-            stdin=subprocess.PIPE, stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL, start_new_session=True)
-        proc.stdin.write(json.dumps({'op': 'warmup'}).encode())
-        proc.stdin.close()
-    except Exception:
-        pass
-
-
-def cached_pot(margin=600):
-    """Return (visitor_data, po_token), reusing a cached bgutil token until it
-    nears expiry and generating a fresh one only when needed.
-
-    This is the speed win: the ~15s proof-of-origin computation runs once per
-    session instead of once per song (the same token is valid for hours, so we
-    cache it and hand it straight to yt-dlp — the way Metrolist reuses one
-    token). Returns (None, None) when generation isn't available; callers then
-    fall back to the per-request script provider."""
-    import time
-    import json as _json
-    path = pot_cache_path()
-    try:
-        with open(path, encoding='utf8') as file:
-            data = _json.load(file)
-        if data.get('po_token') and data.get('visitor_data') \
-                and time.time() < float(data.get('expires_epoch', 0)) - margin:
-            return data['visitor_data'], data['po_token']
-    except (OSError, ValueError, TypeError):
-        pass
-    script = pot_script_path()
-    import shutil
-    deno = os.environ.get('SPUN_YOUTUBE_DENO') or shutil.which('deno')
-    if not script or not deno:
-        return None, None
-    try:
-        import subprocess
-        from datetime import datetime
-        proc = subprocess.run([deno, 'run', '--no-check', '-A', script],
-                              input='{}', capture_output=True, text=True, timeout=90)
-        gen = None
-        for line in reversed(proc.stdout.splitlines()):
-            line = line.strip()
-            if line.startswith('{') and 'poToken' in line:
-                gen = _json.loads(line)
-                break
-        if not gen:
-            return None, None
-        vd, tok = gen.get('contentBinding'), gen.get('poToken')
-        if not vd or not tok:
-            return None, None
-        exp = gen.get('expiresAt', '')
-        try:
-            epoch = datetime.fromisoformat(exp.replace('Z', '+00:00')).timestamp()
-        except ValueError:
-            epoch = time.time() + 3600
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, 'w', encoding='utf8') as file:
-            _json.dump({'visitor_data': vd, 'po_token': tok,
-                        'expires_epoch': epoch}, file)
-        return vd, tok
-    except Exception:
-        return None, None
 
 
 def apply_playback_auth(opts, account):
@@ -537,16 +452,11 @@ def normalize_lyrics(data):
 
 def run(req):
     op = req.get('op', '')
-    if op == 'warmup':
-        # Detached pre-warm: generate and cache the PO token so playback is quick.
-        cached_pot()
-        return {'ok': True}
     if op == 'check':
         import ytmusicapi, yt_dlp, shutil
         if not shutil.which('node'):
             raise RuntimeError('Node.js is required for YouTube playback.')
-        # Kick off PO-token generation now so the first song doesn't wait ~15s.
-        prewarm_pot()
+        remove_stale_pot_cache()
         return {'ready': True}
     if op == 'browser_login':
         # Browser (cookie) authentication: the user pastes the request headers
@@ -663,30 +573,19 @@ def run(req):
         info = None
         last_error = None
         try:
-            for attempt_pass in range(2):
-                for clients, extra in attempts:
-                    opts = dict(base)
-                    opts['extractor_args'] = playback_extractor_args(clients)
-                    opts.update(extra)
-                    try:
-                        with yt_dlp.YoutubeDL(opts) as dl:
-                            info = dl.extract_info(
-                                'https://music.youtube.com/watch?v=' + vid, download=False)
-                        if info:
-                            break
-                    except Exception as exc:
-                        last_error = exc
-                        info = None
-                if info:
-                    break
-                # A stale cached PO token can read as a bot check; drop it and let
-                # the second pass regenerate a fresh one before giving up.
-                low = str(last_error or '').lower()
-                if attempt_pass == 0 and ('not a bot' in low or 'confirm you' in low
-                                          or 'sign in to confirm' in low):
-                    invalidate_pot()
-                    continue
-                break
+            for clients, extra in attempts:
+                opts = dict(base)
+                opts['extractor_args'] = playback_extractor_args(clients)
+                opts.update(extra)
+                try:
+                    with yt_dlp.YoutubeDL(opts) as dl:
+                        info = dl.extract_info(
+                            'https://music.youtube.com/watch?v=' + vid, download=False)
+                    if info:
+                        break
+                except Exception as exc:
+                    last_error = exc
+                    info = None
             if info is None:
                 low = str(last_error or '').lower()
                 if 'not a bot' in low or 'confirm you' in low or 'sign in to confirm' in low:
