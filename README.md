@@ -122,7 +122,7 @@ Copy the request headers from a signed‑in
 
 The session is stored only in `youtube/account.json` (owner‑readable) beside Spun's
 settings. **Sign out** removes it; your local favourites, playlists and history are
-kept. Cookies rotate over time, so occasionally you re‑paste to sign in again.
+kept.
 
 <details>
 <summary><strong>Keyboard shortcuts</strong></summary>
